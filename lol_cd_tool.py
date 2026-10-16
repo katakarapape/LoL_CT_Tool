@@ -34,7 +34,9 @@ from pathlib import Path
 VERSION = "dev"  # リリース時に GitHub Actions がタグ名（v1.2.3 → 1.2.3）で書き換える
 GITHUB_REPO = "katakarapape/LoL_CT_Tool"
 EXE_ASSET = "LoL_CT_Tool.exe"
-UPDATE_INTERVAL_SEC = 6 * 3600  # 常駐中も定期的に更新を確認する
+# 更新確認の間隔（日）。設定 update_days で変更でき、0 なら確認しない
+UPDATE_DAY_CHOICES = [(1, "毎日"), (3, "3日ごと"), (7, "1週間ごと"), (14, "2週間ごと"),
+                      (30, "30日ごと"), (0, "確認しない")]
 LIVE_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
 DDRAGON = "https://ddragon.leagueoflegends.com"
 LOCALE = "ja_JP"
@@ -43,8 +45,10 @@ APP_DIR = Path(sys.executable if FROZEN else __file__).resolve().parent
 CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", APP_DIR)) / "LoL_CT_Tool" / "cache"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SETTINGS_PATH = CACHE_DIR.parent / "settings.json"
+LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更新を確認した UNIX 時刻
 # show_on: 常駐時に表示するタイミング "champselect"=ピック画面から / "client"=クライアント起動時から
-DEFAULT_SETTINGS = {"show_on": "champselect"}
+# update_days: 何日ごとに GitHub の新バージョンを確認するか（0=確認しない）
+DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -125,7 +129,11 @@ def apply_update():
 
 
 def update_worker(on_updated):
-    """起動時と、その後 UPDATE_INTERVAL_SEC ごとに更新を確認する（バックグラウンド）。"""
+    """前回の確認から設定日数（update_days）が経っていれば更新を確認する（バックグラウンド）。
+
+    起動時と、常駐中は1時間ごとに「確認する時期か」を見る。設定は毎回読み直すので、
+    ウィンドウで間隔を変えると常駐側にも反映される。
+    """
     if not FROZEN:
         return
     exe = Path(sys.executable)
@@ -134,14 +142,22 @@ def update_worker(on_updated):
     except OSError:
         pass
     while True:
+        days = load_settings()["update_days"]
         try:
-            latest = apply_update()
-            if latest:
-                on_updated(latest)
-                return  # 差し替え済み。以降は次回起動の新版に任せる
-        except Exception:
-            pass  # オフライン等は次の周期で再試行
-        time.sleep(UPDATE_INTERVAL_SEC)
+            last = float(LAST_UPDATE_CHECK_PATH.read_text())
+        except (OSError, ValueError):
+            last = 0
+        if days > 0 and time.time() - last >= days * 86400:
+            try:
+                latest = apply_update()
+                LAST_UPDATE_CHECK_PATH.parent.mkdir(parents=True, exist_ok=True)
+                LAST_UPDATE_CHECK_PATH.write_text(str(time.time()))
+                if latest:
+                    on_updated(latest)
+                    return  # 差し替え済み。以降は次回起動の新版に任せる
+            except Exception:
+                pass  # オフライン等は1時間後に再試行
+        time.sleep(3600)
 
 
 def load_champion_data():
@@ -556,6 +572,17 @@ class App:
         self.client_var = tk.BooleanVar(value=self.settings["show_on"] == "client")
         tk.Checkbutton(opts, text="クライアント起動時から表示（常駐時）", variable=self.client_var,
                        command=self._toggle_show_on, **check).pack(side="left")
+        labels = dict(UPDATE_DAY_CHOICES)
+        self.update_var = tk.StringVar(
+            value=labels.get(self.settings["update_days"], f"{self.settings['update_days']}日ごと"))
+        menu = tk.OptionMenu(opts, self.update_var, *labels.values(),
+                             command=self._set_update_days)
+        menu.configure(bg=CARD_BG, fg=FG, activebackground=CARD_HL, activeforeground=FG,
+                       relief="flat", highlightthickness=0, font=("Yu Gothic UI", 9), pady=0)
+        menu["menu"].configure(bg=CARD_BG, fg=FG, font=("Yu Gothic UI", 9))
+        menu.pack(side="right")
+        tk.Label(opts, text="更新の確認:", bg=BG, fg=SUB,
+                 font=("Yu Gothic UI", 9)).pack(side="right")
 
         # サモナースペルCD一覧（スクロールしない固定表示）
         self.summ_frame = tk.Frame(root, bg=CARD_BG)
@@ -619,6 +646,12 @@ class App:
         except Exception as e:
             self.autostart_var.set(is_startup_registered())
             self._flash(f"設定に失敗しました: {e}")
+
+    def _set_update_days(self, label):
+        days = next(d for d, l in UPDATE_DAY_CHOICES if l == label)
+        self.settings = {**load_settings(), "update_days": days}
+        save_settings(self.settings)
+        self._flash(f"更新の確認: {label}")
 
     def _toggle_show_on(self):
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
@@ -917,6 +950,8 @@ def main():
                     help="常駐モード: 普段は非表示、ピック画面/試合中に自動表示")
     ap.add_argument("--show-on", choices=["champselect", "client"],
                     help="常駐時に表示するタイミングを設定して保存（champselect=ピック画面から）")
+    ap.add_argument("--update-days", type=int, metavar="N",
+                    help="N日ごとに新バージョンを確認するよう設定して保存（0=確認しない、既定7）")
     ap.add_argument("--install-startup", action="store_true",
                     help="Windows ログイン時に常駐モードで起動するよう登録")
     ap.add_argument("--uninstall-startup", action="store_true", help="スタートアップ登録を解除")
@@ -924,6 +959,8 @@ def main():
 
     if args.show_on:
         save_settings({**load_settings(), "show_on": args.show_on})
+    if args.update_days is not None:
+        save_settings({**load_settings(), "update_days": max(0, args.update_days)})
     if args.install_startup:
         print(install_startup())
         return

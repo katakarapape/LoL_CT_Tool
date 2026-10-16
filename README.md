@@ -34,6 +34,7 @@ LoL_CT_Tool.exe --install-startup     # スタートアップ登録
 LoL_CT_Tool.exe --uninstall-startup   # 登録解除
 LoL_CT_Tool.exe --resident            # 常駐モードで起動
 LoL_CT_Tool.exe --show-on client      # 表示タイミングを「クライアント起動時から」に設定
+LoL_CT_Tool.exe --update-days 14      # 新バージョンの確認を14日ごとに（0で確認しない）
 LoL_CT_Tool.exe --mock sample_allgamedata.json   # 試合外での表示確認
 ```
 
@@ -41,8 +42,11 @@ LoL_CT_Tool.exe --mock sample_allgamedata.json   # 試合外での表示確認
 
 最新の exe は [Releases](https://github.com/katakarapape/LoL_CT_Tool/releases/latest) から `LoL_CT_Tool.exe` を取得します。
 
-Releases 版の exe は起動時（常駐中は6時間ごと）に新しいリリースを確認し、あれば自動でダウンロードして
-exe を差し替えます。差し替えは次回起動から反映されます（ウィンドウのタイトルに「更新済み」と出ます）。
+Releases 版の exe は前回の確認から一定期間（既定は1週間）経つと新しいリリースを確認し、あれば自動で
+ダウンロードして exe を差し替えます。差し替えは次回起動から反映されます（ウィンドウのタイトルに「更新済み」と出ます）。
+
+確認の間隔はウィンドウ右上の **「更新の確認」** で変更できます（毎日 / 3日 / 1週間 / 2週間 / 30日ごと / 確認しない）。
+コマンドラインの `--update-days N` でも設定できます（N日ごと、0 で確認しない）。
 自分でビルドした exe（バージョン `dev`）は自動更新しません。
 
 ### リリースのしかた
