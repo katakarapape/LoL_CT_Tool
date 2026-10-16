@@ -92,14 +92,26 @@ def _version_tuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
 
 
+_UPDATE_LOCK = threading.Lock()  # 自動確認と「今すぐ確認」が同時に差し替えないように
+_updated_to = None  # この起動中に差し替え済みのバージョン
+
+
 def apply_update():
     """GitHub の最新リリースが今の exe より新しければダウンロードして差し替える。
 
     実行中の exe は上書きできないが名前変更はできるので、今の exe を .old に退避して
     新しい exe を同じ名前で置く（次回起動から新版。.old は次回起動時に削除）。
     """
+    global _updated_to
     if not FROZEN or VERSION == "dev":
         return None
+    with _UPDATE_LOCK:
+        if _updated_to is None:
+            _updated_to = _download_update()
+        return _updated_to
+
+
+def _download_update():
     headers = {"User-Agent": f"LoL_CT_Tool/{VERSION}", "Accept": "application/vnd.github+json"}
     rel = http_json(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
                     timeout=10, headers=headers)
@@ -239,6 +251,22 @@ def load_summoners(version):
         except Exception:
             continue  # アイコン取得に失敗したスペルだけ飛ばす
     return result
+
+
+# --- オブジェクト・アイテムのタイマー -------------------------------------------
+# (名前, 時間, 補足)。Data Dragon に無いので固定値。
+# LoL Wiki の各記事より（2026-10 / パッチ 16.20 時点）。変わったらここを書き換える
+TIMERS = [
+    ("ドラゴン", "5:00", "再出現 5:00"),
+    ("エルダー", "6:00", "ソウル後\n再出現 6:00"),
+    ("ヴォイドクラブ", "8:00", "14:45 消滅\n再出現なし"),
+    ("ヘラルド", "15:00", "19:45 消滅"),
+    ("バロン", "20:00", "再出現 6:00"),
+    ("バロンバフ", "180", "効果時間(秒)"),
+    ("エルダーバフ", "150", "効果時間(秒)"),
+    ("ゾーニャ", "120", "アクティブCD"),
+    ("GA", "300", "復活CD"),
+]
 
 
 # --- パッシブ説明 (LoL JP Wiki) ------------------------------------------------
@@ -538,6 +566,7 @@ class App:
         self.polling = False
         self.visible = True
         self.dismissed = False  # 常駐時、ユーザーが閉じたら次の試合まで出さない
+        self.updated_to = None  # 更新済みのバージョン（同じ起動中に二重に差し替えない）
 
         root.title(f"LoL 敵スキルCD一覧 v{VERSION}")
         # 画面に収まる高さにする（タスクバー分を空ける）
@@ -584,6 +613,10 @@ class App:
         menu.configure(bg=CARD_BG, fg=FG, activebackground=CARD_HL, activeforeground=FG,
                        relief="flat", highlightthickness=0, font=("Yu Gothic UI", 9), pady=0)
         menu["menu"].configure(bg=CARD_BG, fg=FG, font=("Yu Gothic UI", 9))
+        self.check_btn = tk.Button(opts, text="今すぐ確認", command=self._check_update_now,
+                                   bg=CARD_BG, fg=FG, relief="flat", activebackground=CARD_HL,
+                                   activeforeground=FG, font=("Yu Gothic UI", 9), padx=5, pady=0)
+        self.check_btn.pack(side="right", padx=(4, 0))
         menu.pack(side="right")
         tk.Label(opts, text="更新の確認:", bg=BG, fg=SUB,
                  font=("Yu Gothic UI", 9)).pack(side="right")
@@ -592,6 +625,7 @@ class App:
         self.summ_frame = tk.Frame(root, bg=CARD_BG)
         self.summ_frame.pack(fill="x", padx=10, pady=(4, 0))
         self.summ_icons = []  # PhotoImage の参照を保持（GC で消えないように）
+        self._build_timer_bar()
 
         container = tk.Frame(root, bg=BG)
         container.pack(fill="both", expand=True, padx=6, pady=6)
@@ -657,6 +691,26 @@ class App:
         save_settings(self.settings)
         self._flash(f"更新の確認: {label}")
 
+    def _check_update_now(self):
+        if not FROZEN or VERSION == "dev":
+            self._flash("開発版（exe 以外）のため更新の確認はできません")
+            return
+        if self.updated_to:
+            self._flash(f"{self.updated_to} に更新済みです（次回起動から反映）")
+            return
+        self.check_btn.configure(state="disabled")
+        self._flash("更新を確認中…")
+
+        def work():
+            try:
+                latest = apply_update()
+                LAST_UPDATE_CHECK_PATH.parent.mkdir(parents=True, exist_ok=True)
+                LAST_UPDATE_CHECK_PATH.write_text(str(time.time()))
+                self.results.put(("check_done", latest))
+            except Exception as e:
+                self.results.put(("check_error", str(e)))
+        threading.Thread(target=work, daemon=True).start()
+
     def _toggle_show_on(self):
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
         save_settings(self.settings)
@@ -697,6 +751,19 @@ class App:
             if sub:
                 tk.Label(cell, text=sub, bg=CARD_BG, fg=SUB, pady=0,
                          font=("Yu Gothic UI", 7)).pack()
+
+    def _build_timer_bar(self):
+        frame = tk.Frame(self.root, bg=CARD_BG)
+        frame.pack(fill="x", padx=10, pady=(4, 0))
+        for col, (name, value, sub) in enumerate(TIMERS):
+            frame.columnconfigure(col, weight=1, uniform="timer")
+            cell = tk.Frame(frame, bg=CARD_BG)
+            cell.grid(row=0, column=col, sticky="n", pady=4)
+            tk.Label(cell, text=name, bg=CARD_BG, fg=FG, font=("Yu Gothic UI", 8)).pack()
+            tk.Label(cell, text=value, bg=CARD_BG, fg=GOLD, pady=0,
+                     font=("Consolas", 10, "bold")).pack()
+            tk.Label(cell, text=sub, bg=CARD_BG, fg=SUB, pady=0,
+                     font=("Yu Gothic UI", 7)).pack()
 
     def _passive_worker(self):
         """敵チャンピオンのパッシブを1件ずつ JP Wiki から取得（サイトに負荷をかけないよう直列）。"""
@@ -756,7 +823,18 @@ class App:
                 elif kind == "summoners":
                     self._build_summoner_bar(payload)
                 elif kind == "updated":
+                    self.updated_to = payload
                     self.root.title(f"LoL 敵スキルCD一覧 v{VERSION}（{payload} に更新済み・次回起動から反映）")
+                elif kind == "check_done":
+                    self.check_btn.configure(state="normal")
+                    if payload:
+                        self.results.put(("updated", payload))
+                        self._flash(f"{payload} に更新しました（次回起動から反映）")
+                    else:
+                        self._flash(f"最新版です（v{VERSION}）")
+                elif kind == "check_error":
+                    self.check_btn.configure(state="normal")
+                    self._flash(f"更新の確認に失敗しました: {payload}")
                 elif kind == "passive":
                     champ_id, info = payload
                     self.passive_pending.discard(champ_id)
