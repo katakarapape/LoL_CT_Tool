@@ -1,0 +1,12 @@
+{
+  "activePlayer": { "riotId": "Me#JP1", "summonerName": "Me" },
+  "allPlayers": [
+    { "riotId": "Me#JP1", "summonerName": "Me", "team": "ORDER", "position": "MIDDLE", "championName": "Ahri", "rawChampionName": "game_character_displayname_Ahri" },
+    { "riotId": "A1#JP1", "summonerName": "A1", "team": "ORDER", "position": "TOP", "championName": "Garen", "rawChampionName": "game_character_displayname_Garen" },
+    { "riotId": "E1#JP1", "summonerName": "E1", "team": "CHAOS", "position": "TOP", "championName": "Darius", "rawChampionName": "game_character_displayname_Darius" },
+    { "riotId": "E2#JP1", "summonerName": "E2", "team": "CHAOS", "position": "JUNGLE", "championName": "Lee Sin", "rawChampionName": "game_character_displayname_LeeSin" },
+    { "riotId": "E3#JP1", "summonerName": "E3", "team": "CHAOS", "position": "MIDDLE", "championName": "Zed", "rawChampionName": "game_character_displayname_Zed" },
+    { "riotId": "E4#JP1", "summonerName": "E4", "team": "CHAOS", "position": "BOTTOM", "championName": "Jinx", "rawChampionName": "game_character_displayname_Jinx" },
+    { "riotId": "E5#JP1", "summonerName": "E5", "team": "CHAOS", "position": "UTILITY", "championName": "Wukong", "rawChampionName": "game_character_displayname_MonkeyKing" }
+  ]
+}

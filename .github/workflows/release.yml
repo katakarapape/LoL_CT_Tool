@@ -1,0 +1,40 @@
+# v1.2.3 のようなタグを push すると exe をビルドして GitHub Releases に公開する。
+# 配布済みの exe は Releases の最新版を見て自動で差し替わる。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          (Get-Content lol_cd_tool.py -Raw -Encoding utf8) -replace '(?m)^VERSION = "dev"', "VERSION = `"$v`"" |
+            Set-Content lol_cd_tool.py -Encoding utf8 -NoNewline
+          Select-String -Path lol_cd_tool.py -Pattern '^VERSION = ' | ForEach-Object { $_.Line }
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          python -m pip install -q pyinstaller
+          pyinstaller --noconfirm --onefile --noconsole --name LoL_CT_Tool `
+            --distpath dist --workpath build lol_cd_tool.py
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LoL_CT_Tool.exe
+          generate_release_notes: true
