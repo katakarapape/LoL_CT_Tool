@@ -197,7 +197,10 @@ EXTRA_SUMMONERS = {
     "UnleashedTeleport": {"name": "真TP", "cd": "330→240", "sub": "10分〜\nLv1→10"},
     "QuestTeleport": {"name": "クエストTP", "cd": "390", "sub": "TP持ちは\n300→210"},
 }
-SUMMONER_SUB = {"SummonerTeleport": "10分で\n真TPに", "SummonerSmite": "チャージ式"}
+SUMMONER_SUB = {"SummonerTeleport": "10分で\n真TPに", "SummonerSmite": "チャージ式\n最大2・間隔15"}
+# Data Dragon の cooldownBurn がチャージ時間でないスペルの上書き（スマイトの 15 は連続使用の間隔）。
+# LoL Wiki の Smite 記事より（2026-10 / パッチ 16.20 時点）。変わったらここを書き換える
+SUMMONER_CD_OVERRIDE = {"SummonerSmite": "90"}
 
 
 def load_summoners(version):
@@ -230,7 +233,8 @@ def load_summoners(version):
                 s = data[sid]
                 path = icon(s["image"]["full"],
                             f"{DDRAGON}/cdn/{version}/img/spell/{s['image']['full']}")
-                result.append((sid, s["name"], cd_range(s["cooldownBurn"]),
+                cd = SUMMONER_CD_OVERRIDE.get(sid) or cd_range(s["cooldownBurn"])
+                result.append((sid, s["name"], cd,
                                SUMMONER_SUB.get(sid, ""), path))
         except Exception:
             continue  # アイコン取得に失敗したスペルだけ飛ばす
