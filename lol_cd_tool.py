@@ -323,6 +323,21 @@ def cd_range(burn):
     return vals[0] if len(set(vals)) == 1 else f"{vals[0]}→{vals[-1]}"
 
 
+def spell_range_text(burn):
+    """'1150' → '1150'、'1000/1100/1200' → '1000→1200'、5000以上 → '全域'。
+    25000 は自身対象にも全域にも使われていて区別できないので、0・self と同じく '' を返す。"""
+    vals = [v for v in burn.split("/") if v]
+    try:
+        nums = [float(v) for v in vals]
+    except ValueError:
+        return ""
+    if not nums or max(nums) <= 0 or max(nums) >= 25000:
+        return ""
+    if min(nums) >= 5000:
+        return "全域"
+    return cd_range("/".join(vals))
+
+
 def passive_cd_summary(text):
     """JP Wiki の説明文から最初の『CD: …』『固定CD: …』を拾って要約（無ければ ''）。"""
     m = re.search(r"^(?:固定)?CD\s*[:：]\s*([\d./]+)", text, re.M)
@@ -1090,7 +1105,9 @@ class App:
             cd_text = cd if cd and cd != "0" else "—"
             key_label = tk.Label(grid, text=key, bg=bg, fg=KEY_FG, width=2, pady=0,
                                  font=("Consolas", 10, "bold"))
-            name_label = tk.Label(grid, text=spell["name"], bg=bg, fg=FG, anchor="w", pady=0,
+            spell_range = spell_range_text(spell.get("rangeBurn", ""))
+            name_text = f"{spell['name']}  {spell_range}" if spell_range else spell["name"]
+            name_label = tk.Label(grid, text=name_text, bg=bg, fg=FG, anchor="w", pady=0,
                                   font=("Yu Gothic UI", 9))
             cd_label = tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="w" if layout == "row" else "e",
                                 pady=0, font=("Consolas", 10))
