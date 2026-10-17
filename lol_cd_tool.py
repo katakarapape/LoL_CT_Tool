@@ -48,7 +48,8 @@ SETTINGS_PATH = CACHE_DIR.parent / "settings.json"
 LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更新を確認した UNIX 時刻
 # show_on: 常駐時に表示するタイミング "champselect"=ピック画面から / "client"=クライアント起動時から
 # update_days: 何日ごとに GitHub の新バージョンを確認するか（0=確認しない）
-DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7}
+# spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=Q W E R の4列
+DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid"}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -267,6 +268,26 @@ TIMERS = [
     ("ゾーニャ", "120", "アクティブCD"),
     ("GA", "300", "復活CD"),
 ]
+
+
+# --- 通常攻撃の射程 -------------------------------------------------------------
+# Data Dragon の attackrange は Lv1 の値のみ。レベルで射程が伸びるチャンピオンは最大値を固定で持つ。
+# LoL Wiki の各記事より（2026-10 / パッチ 16.20 時点）。変わったらここを書き換える
+# チャンピオンID → (Lv1の射程, 最大射程, 最大になるLv)
+RANGE_SCALING = {
+    "Tristana": (550, 718, 18),  # パッシブ: 0〜167.65（レベル比例）
+    "Kayle": (175, 625, 16),     # Lv6 で 525、Lv16 で 625
+    "Gnar": (400, 500, 18),      # ミニナー: 175 + 225〜325（レベル比例）。メガナーは 175
+}
+
+
+def attack_range_text(champ):
+    """'射程 550' / レベルで伸びる場合は '射程 550→718 (Lv18)'。"""
+    scaling = RANGE_SCALING.get(champ["id"])
+    if scaling:
+        lv1, top, lv = scaling
+        return f"射程 {lv1}→{top} (Lv{lv})"
+    return f"射程 {round(champ['stats']['attackrange'])}"
 
 
 # --- パッシブ説明 (LoL JP Wiki) ------------------------------------------------
@@ -585,8 +606,13 @@ class App:
                       activebackground=CARD_HL, activeforeground=FG).pack(side="right")
         bar = tk.Frame(root, bg=BG)
         bar.pack(fill="x", padx=10)
-        tk.Label(bar, text="※ 単位は秒・ランク順。基本CD（ヘイスト等の短縮は未反映）",
+        tk.Label(bar, text="※ 秒・ランク順の基本CD（ヘイスト等は未反映）",
                  bg=BG, fg=SUB, anchor="w", font=("Yu Gothic UI", 9)).pack(side="left")
+        self.row_layout_var = tk.BooleanVar(value=self.settings["spell_layout"] == "row")
+        tk.Checkbutton(bar, text="QWERを4列", variable=self.row_layout_var,
+                       command=self._toggle_layout, bg=BG, fg=FG, selectcolor=CARD_BG,
+                       activebackground=BG, activeforeground=FG,
+                       font=("Yu Gothic UI", 9)).pack(side="left", padx=(6, 0))
         btn = dict(bg=CARD_BG, fg=FG, relief="flat", activebackground=CARD_HL,
                    activeforeground=FG, font=("Yu Gothic UI", 9), padx=5, pady=0)
         # 右から順に並ぶので逆順で追加
@@ -714,6 +740,12 @@ class App:
     def _toggle_show_on(self):
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
         save_settings(self.settings)
+
+    def _toggle_layout(self):
+        layout = "row" if self.row_layout_var.get() else "grid"
+        self.settings = {**load_settings(), "spell_layout": layout}
+        save_settings(self.settings)
+        self._rerender()
 
     def _flash(self, msg):
         self.status.configure(text=msg)
@@ -953,15 +985,19 @@ class App:
             header += f"  [{pos}]"
         if is_lane:
             header += "  ★対面"
-        head = tk.Label(card, text=header, bg=bg, fg=GOLD if is_lane else FG, anchor="w",
+        head_row = tk.Frame(card, bg=bg)
+        head_row.pack(fill="x", padx=8, pady=(2, 0))
+        head = tk.Label(head_row, text=header, bg=bg, fg=GOLD if is_lane else FG, anchor="w",
                         cursor="hand2", font=("Yu Gothic UI", 11, "bold"))
-        head.pack(fill="x", padx=8, pady=(2, 0))
+        head.pack(side="left", fill="x", expand=True)
 
         if not champ:
             tk.Label(card, text="チャンピオンデータが見つかりません", bg=bg, fg=SUB,
                      anchor="w").pack(fill="x", padx=8, pady=(0, 6))
             return
         head.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, cid))
+        tk.Label(head_row, text=attack_range_text(champ), bg=bg, fg=SUB,
+                 font=("Yu Gothic UI", 9)).pack(side="right")
 
         # P: JP Wiki の説明文をそのまま表示（取得できなければ Data Dragon の公式説明文）
         if cid not in self.passives:
@@ -986,13 +1022,21 @@ class App:
 
         grid = tk.Frame(card, bg=bg)
         grid.pack(fill="x", padx=8, pady=(0, 3))
-        # 列: [キー, 名前, CD] × 2（Q W / E R の2×2配置）。名前列を伸ばしてCDを右寄せ
-        # CD列は最長の値に合わせた固定幅、名前列は均等にして、全カードで列位置を揃える
-        cd_width = tkfont.Font(family="Consolas", size=10).measure("0" * 21)
-        for c in (1, 4):
-            grid.columnconfigure(c, weight=1, uniform="name")
-        for c in (2, 5):
-            grid.columnconfigure(c, minsize=cd_width)
+        row_layout = self.settings["spell_layout"] == "row"
+        if row_layout:
+            # 列: [キー, 名前/CD] × 4（Q W E R を横一列。CDは名前の下）
+            for c in (1, 3, 5, 7):
+                grid.columnconfigure(c, weight=1, uniform="name")
+            last_col = 7
+        else:
+            # 列: [キー, 名前, CD] × 2（Q W / E R の2×2配置）。名前列を伸ばしてCDを右寄せ
+            # CD列は最長の値に合わせた固定幅、名前列は均等にして、全カードで列位置を揃える
+            cd_width = tkfont.Font(family="Consolas", size=10).measure("0" * 21)
+            for c in (1, 4):
+                grid.columnconfigure(c, weight=1, uniform="name")
+            for c in (2, 5):
+                grid.columnconfigure(c, minsize=cd_width)
+            last_col = 5
 
         passive_open = cid in self.expanded_passives
         tk.Label(grid, text="P", bg=bg, fg=KEY_FG, width=2, pady=0,
@@ -1000,30 +1044,37 @@ class App:
         p_name = tk.Label(grid, text=f"{passive_name}  {'▼' if passive_open else '▶ 説明を表示'}",
                           bg=bg, fg=FG, anchor="w", cursor="hand2", pady=0,
                           font=("Yu Gothic UI", 9))
-        p_name.grid(row=0, column=1, columnspan=4, sticky="w", padx=(2, 8))
+        p_name.grid(row=0, column=1, columnspan=last_col - 1, sticky="w", padx=(2, 8))
         p_name.bind("<Button-1>", lambda e: self._toggle(self.expanded_passives, cid))
         tk.Label(grid, text=passive_cd or "", bg=bg, fg=FG, anchor="e", pady=0,
-                 font=("Consolas", 10)).grid(row=0, column=5, sticky="e")
+                 font=("Consolas", 10)).grid(row=0, column=last_col, sticky="e")
         if passive_open:
             # Tk は半角スペースで優先的に改行するため、日本語文中では折り返しが不自然になる
             tk.Label(grid, text=passive_text.replace(" ", " "), bg=bg, fg=PASSIVE_FG,
                      anchor="w", justify="left",
                      wraplength=600, font=("Yu Gothic UI", 9)
-                     ).grid(row=1, column=1, columnspan=5, sticky="w", padx=(2, 8), pady=(0, 4))
+                     ).grid(row=1, column=1, columnspan=last_col, sticky="w", padx=(2, 8), pady=(0, 4))
 
         for i, (key, spell) in enumerate(zip(SPELL_KEYS, champ["spells"])):
-            row, col = 2 + i // 2, (i % 2) * 3
             cd = spell.get("cooldownBurn", "")
             cd_text = cd if cd and cd != "0" else "—"
-            tk.Label(grid, text=key, bg=bg, fg=KEY_FG, width=2, pady=0,
-                     font=("Consolas", 10, "bold")).grid(row=row, column=col, sticky="w")
-            tk.Label(grid, text=spell["name"], bg=bg, fg=FG, anchor="w", pady=0,
-                     font=("Yu Gothic UI", 9)).grid(row=row, column=col + 1, sticky="w",
-                                                    padx=(2, 6))
-            tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="e", pady=0,
-                     font=("Consolas", 10)).grid(row=row, column=col + 2, sticky="e",
-                                                 padx=(0, 14 if col == 0 else 0))
-
+            key_label = tk.Label(grid, text=key, bg=bg, fg=KEY_FG, width=2, pady=0,
+                                 font=("Consolas", 10, "bold"))
+            name_label = tk.Label(grid, text=spell["name"], bg=bg, fg=FG, anchor="w", pady=0,
+                                  font=("Yu Gothic UI", 9))
+            cd_label = tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="w" if row_layout else "e",
+                                pady=0, font=("Consolas", 10))
+            if row_layout:
+                col = i * 2
+                key_label.grid(row=2, column=col, sticky="w")
+                name_label.grid(row=2, column=col + 1, sticky="w", padx=(2, 6))
+                cd_label.grid(row=3, column=col + 1, sticky="w", padx=(2, 6))
+            else:
+                row, col = 2 + i // 2, (i % 2) * 3
+                key_label.grid(row=row, column=col, sticky="w")
+                name_label.grid(row=row, column=col + 1, sticky="w", padx=(2, 6))
+                cd_label.grid(row=row, column=col + 2, sticky="e",
+                              padx=(0, 14 if col == 0 else 0))
 
 def main():
     ap = argparse.ArgumentParser(description="LoL 敵スキルCD一覧ツール")
