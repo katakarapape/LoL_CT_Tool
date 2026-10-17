@@ -48,7 +48,7 @@ SETTINGS_PATH = CACHE_DIR.parent / "settings.json"
 LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更新を確認した UNIX 時刻
 # show_on: 常駐時に表示するタイミング "champselect"=ピック画面から / "client"=クライアント起動時から
 # update_days: 何日ごとに GitHub の新バージョンを確認するか（0=確認しない）
-# spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=Q W E R の4列
+# spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=横4列 / "column"=縦4行
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid"}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
@@ -67,6 +67,10 @@ POSITION_LABEL = {
 LCU_POSITION = {"top": "TOP", "jungle": "JUNGLE", "middle": "MIDDLE", "bottom": "BOTTOM",
                 "utility": "UTILITY"}
 SPELL_KEYS = ["Q", "W", "E", "R"]
+# スキルCDの並び: (設定値, ツールチップ, アイコンのマス (列, 行) の一覧)
+SPELL_LAYOUTS = [("grid", "2×2（Q W / E R）", [(0, 0), (1, 0), (0, 1), (1, 1)]),
+                 ("row", "横4列（Q W E R）", [(0, 0), (1, 0), (2, 0), (3, 0)]),
+                 ("column", "縦4行（Q / W / E / R）", [(0, 0), (0, 1), (0, 2), (0, 3)])]
 
 BG = "#10141c"
 CARD_BG = "#1a2130"
@@ -608,11 +612,18 @@ class App:
         bar.pack(fill="x", padx=10)
         tk.Label(bar, text="※ 秒・ランク順の基本CD（ヘイスト等は未反映）",
                  bg=BG, fg=SUB, anchor="w", font=("Yu Gothic UI", 9)).pack(side="left")
-        self.row_layout_var = tk.BooleanVar(value=self.settings["spell_layout"] == "row")
-        tk.Checkbutton(bar, text="QWERを4列", variable=self.row_layout_var,
-                       command=self._toggle_layout, bg=BG, fg=FG, selectcolor=CARD_BG,
-                       activebackground=BG, activeforeground=FG,
-                       font=("Yu Gothic UI", 9)).pack(side="left", padx=(6, 0))
+        # スキルの並びの切り替え（並び方を図にしたアイコン）
+        tk.Label(bar, text="並び:", bg=BG, fg=SUB,
+                 font=("Yu Gothic UI", 9)).pack(side="left", padx=(8, 2))
+        self.layout_icons = {}
+        for layout, tip, cells in SPELL_LAYOUTS:
+            icon = tk.Canvas(bar, width=26, height=22, bg=CARD_BG, highlightthickness=1,
+                             cursor="hand2")
+            icon.pack(side="left", padx=1)
+            icon.bind("<Button-1>", lambda e, l=layout: self._set_layout(l))
+            icon.bind("<Enter>", lambda e, t=tip: self._flash(f"スキルの並び: {t}"))
+            self.layout_icons[layout] = (icon, cells)
+        self._draw_layout_icons()
         btn = dict(bg=CARD_BG, fg=FG, relief="flat", activebackground=CARD_HL,
                    activeforeground=FG, font=("Yu Gothic UI", 9), padx=5, pady=0)
         # 右から順に並ぶので逆順で追加
@@ -741,10 +752,25 @@ class App:
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
         save_settings(self.settings)
 
-    def _toggle_layout(self):
-        layout = "row" if self.row_layout_var.get() else "grid"
+    def _draw_layout_icons(self):
+        """各アイコンにマスの並びを描き、選択中のものを金色で強調する。"""
+        for layout, (icon, cells) in self.layout_icons.items():
+            selected = layout == self.settings["spell_layout"]
+            color = GOLD if selected else SUB
+            icon.configure(highlightbackground=GOLD if selected else CARD_BG,
+                           highlightcolor=GOLD if selected else CARD_BG)
+            icon.delete("all")
+            cols = max(c for c, _ in cells) + 1
+            rows = max(r for _, r in cells) + 1
+            cw, ch = 20 / cols, 16 / rows  # 余白を除いた描画領域 20×16 を等分
+            for c, r in cells:
+                x, y = 4 + c * cw, 4 + r * ch
+                icon.create_rectangle(x, y, x + cw - 2, y + ch - 2, fill=color, outline="")
+
+    def _set_layout(self, layout):
         self.settings = {**load_settings(), "spell_layout": layout}
         save_settings(self.settings)
+        self._draw_layout_icons()
         self._rerender()
 
     def _flash(self, msg):
@@ -1022,12 +1048,16 @@ class App:
 
         grid = tk.Frame(card, bg=bg)
         grid.pack(fill="x", padx=8, pady=(0, 3))
-        row_layout = self.settings["spell_layout"] == "row"
-        if row_layout:
+        layout = self.settings["spell_layout"]
+        if layout == "row":
             # 列: [キー, 名前/CD] × 4（Q W E R を横一列。CDは名前の下）
             for c in (1, 3, 5, 7):
                 grid.columnconfigure(c, weight=1, uniform="name")
             last_col = 7
+        elif layout == "column":
+            # 列: [キー, 名前, CD]（Q / W / E / R を縦に1行ずつ）
+            grid.columnconfigure(1, weight=1)
+            last_col = 2
         else:
             # 列: [キー, 名前, CD] × 2（Q W / E R の2×2配置）。名前列を伸ばしてCDを右寄せ
             # CD列は最長の値に合わせた固定幅、名前列は均等にして、全カードで列位置を揃える
@@ -1062,19 +1092,24 @@ class App:
                                  font=("Consolas", 10, "bold"))
             name_label = tk.Label(grid, text=spell["name"], bg=bg, fg=FG, anchor="w", pady=0,
                                   font=("Yu Gothic UI", 9))
-            cd_label = tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="w" if row_layout else "e",
+            cd_label = tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="w" if layout == "row" else "e",
                                 pady=0, font=("Consolas", 10))
-            if row_layout:
+            if layout == "row":
                 col = i * 2
                 key_label.grid(row=2, column=col, sticky="w")
                 name_label.grid(row=2, column=col + 1, sticky="w", padx=(2, 6))
                 cd_label.grid(row=3, column=col + 1, sticky="w", padx=(2, 6))
+            elif layout == "column":
+                key_label.grid(row=2 + i, column=0, sticky="w")
+                name_label.grid(row=2 + i, column=1, sticky="w", padx=(2, 6))
+                cd_label.grid(row=2 + i, column=2, sticky="e")
             else:
                 row, col = 2 + i // 2, (i % 2) * 3
                 key_label.grid(row=row, column=col, sticky="w")
                 name_label.grid(row=row, column=col + 1, sticky="w", padx=(2, 6))
                 cd_label.grid(row=row, column=col + 2, sticky="e",
                               padx=(0, 14 if col == 0 else 0))
+
 
 def main():
     ap = argparse.ArgumentParser(description="LoL 敵スキルCD一覧ツール")
