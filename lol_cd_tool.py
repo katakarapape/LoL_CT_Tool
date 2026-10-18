@@ -1051,10 +1051,12 @@ class App:
         passive_cd = passive_cd_summary(passive_text)
 
         if not card_open:
-            # 折りたたみ時は全スキルのCDを1行に要約（ランク1→最大ランク）
+            # 折りたたみ時は全スキルのCDを1行に要約（ランク1→最大ランク）。射程があれば括弧で添える
             parts = [f"P {passive_cd}"] if passive_cd else []
-            parts += [f"{key} {cd_range(spell.get('cooldownBurn', ''))}"
-                      for key, spell in zip(SPELL_KEYS, champ["spells"])]
+            for key, spell in zip(SPELL_KEYS, champ["spells"]):
+                part = f"{key} {cd_range(spell.get('cooldownBurn', ''))}"
+                spell_range = spell_range_text(spell.get("rangeBurn", ""))
+                parts.append(f"{part}({spell_range})" if spell_range else part)
             summary = tk.Label(card, text="   ".join(parts), bg=bg, fg=PASSIVE_FG, anchor="w",
                                cursor="hand2", font=("Consolas", 10))
             summary.pack(fill="x", padx=(28, 8), pady=(0, 4))
