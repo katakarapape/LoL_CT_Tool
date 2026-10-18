@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 - サモナースペル（最上段・アイコン付き）: Data Dragon の `summoner.json` とアイコン。
   真TP（10分以降 / 330→240秒）とクエストTP（390秒、TP持ちは真TPが300→210秒）は Data Dragon に無いため、
   LoL Wiki の Teleport 記事を元に `EXTRA_SUMMONERS` に記載（パッチ 16.20 時点）。真TPのアイコンは CommunityDragon から取得。
-- オブジェクト・アイテムのタイマー（2段目）: ドラゴン・エルダー・ヴォイドクラブ・ヘラルド・バロンの出現時間、
+- オブジェクト・アイテムのタイマー（2段目）: カニ（スカトル）・ドラゴン・エルダー・ヴォイドクラブ・ヘラルド・バロンの出現時間、
   バロンバフ・エルダーバフの効果時間、ゾーニャ・GA のCD。Data Dragon に無いため LoL Wiki を元に
   `TIMERS` に記載（パッチ 16.20 時点）。
 - パッシブ: [LoL 日本語 Wiki](https://www.loljp-wiki.jp/wiki/?Champion) の各チャンピオンページから説明文をそのまま表示。
