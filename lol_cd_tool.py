@@ -49,7 +49,9 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # show_on: 常駐時に表示するタイミング "champselect"=ピック画面から / "client"=クライアント起動時から
 # update_days: 何日ごとに GitHub の新バージョンを確認するか（0=確認しない）
 # spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=横4列 / "column"=縦4行
-DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid"}
+# timer_voice: 試合時間の節目（VOICE_TIMES）を音声で知らせるか
+DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
+                    "timer_voice": False}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -273,6 +275,26 @@ TIMERS = [
     ("ゾーニャ", "120", "アクティブCD"),
     ("GA", "300", "復活CD"),
 ]
+
+# 試合時間の音声案内: (試合開始からの秒数, 読み上げる文)。
+# 主なオブジェクトの初出現（カニ・ドラゴン・ヴォイドクラブ・ヘラルド・バロン）と25/30分
+VOICE_TIMES = [(175, "2分55秒経過"), (300, "5分経過"), (480, "8分経過"), (900, "15分経過"),
+               (1200, "20分経過"), (1500, "25分経過"), (1800, "30分経過")]
+VOICE_LATE_SEC = 10  # 節目からこれ以上過ぎていたら読まない（途中参加・再接続で一斉に読まない）
+
+
+def speak(text):
+    """Windows 標準の音声合成（System.Speech）で読み上げる。終わるまで戻らないので別スレッドで呼ぶ。"""
+    ps = ("Add-Type -AssemblyName System.Speech;"
+          "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:SPEAK_TEXT)")
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                   env=dict(os.environ, SPEAK_TEXT=text), creationflags=NO_WINDOW)
+
+
+def due_voice_lines(prev_time, now, announced):
+    """前回の試合時間 prev_time から now までに来た節目のうち、まだ読んでおらず遅すぎないもの。"""
+    return [(sec, text) for sec, text in VOICE_TIMES
+            if sec not in announced and prev_time < sec <= now and now - sec < VOICE_LATE_SEC]
 
 
 # --- 通常攻撃の射程 -------------------------------------------------------------
@@ -608,6 +630,9 @@ class App:
         self.visible = True
         self.dismissed = False  # 常駐時、ユーザーが閉じたら次の試合まで出さない
         self.updated_to = None  # 更新済みのバージョン（同じ起動中に二重に差し替えない）
+        self.game_time = -1  # 前回ポーリング時の試合時間（秒）。試合外は -1
+        self.announced = set()  # この試合で読み上げ済みの節目（VOICE_TIMES の秒数）
+        self.voice_queue = queue.Queue()  # 読み上げ待ちの文（重ならないよう1件ずつ読む）
 
         root.title(f"LoL 敵スキルCD一覧 v{VERSION}")
         # 画面に収まる高さにする（タスクバー分を空ける）
@@ -658,6 +683,9 @@ class App:
         self.client_var = tk.BooleanVar(value=self.settings["show_on"] == "client")
         tk.Checkbutton(opts, text="クライアント起動時から表示（常駐時）", variable=self.client_var,
                        command=self._toggle_show_on, **check).pack(side="left")
+        self.voice_var = tk.BooleanVar(value=self.settings["timer_voice"])
+        tk.Checkbutton(opts, text="タイマー音声", variable=self.voice_var,
+                       command=self._toggle_voice, **check).pack(side="left")
         labels = dict(UPDATE_DAY_CHOICES)
         self.update_var = tk.StringVar(
             value=labels.get(self.settings["update_days"], f"{self.settings['update_days']}日ごと"))
@@ -700,6 +728,7 @@ class App:
             self._set_visible(False)
 
         threading.Thread(target=self._load_data, daemon=True).start()
+        threading.Thread(target=self._voice_worker, daemon=True).start()
         threading.Thread(target=update_worker, daemon=True,
                          args=(lambda v: self.results.put(("updated", v)),)).start()
         self.root.after(100, self._drain)
@@ -767,6 +796,39 @@ class App:
     def _toggle_show_on(self):
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
         save_settings(self.settings)
+
+    def _toggle_voice(self):
+        self.settings = {**load_settings(), "timer_voice": self.voice_var.get()}
+        save_settings(self.settings)
+        self._flash("タイマー音声: " + ("オン（" + "・".join(t.replace("経過", "") for _, t in VOICE_TIMES)
+                                       + " で読み上げ）" if self.voice_var.get() else "オフ"))
+
+    def _voice_worker(self):
+        while True:
+            text = self.voice_queue.get()
+            try:
+                speak(text)
+            except Exception:
+                pass  # 音声合成が使えない環境でも本体は動かす
+
+    def _announce_time(self, game):
+        """試合時間が節目を越えたら読み上げる（タイマー音声がオンのときだけ）。"""
+        now = (game.get("gameData") or {}).get("gameTime")
+        if now is None:
+            return
+        if now < self.game_time:  # 時間が戻った = 別の試合
+            self.announced.clear()
+        due = due_voice_lines(self.game_time, now, self.announced)
+        self.game_time = now
+        if not due:
+            return
+        self.announced.update(sec for sec, _ in due)
+        # 設定はファイルから読み直す（別プロセスのウィンドウでの切り替えを常駐側にも反映）。
+        # 常駐と手動起動のウィンドウが同時に動いているときは常駐側だけが読む（二重に鳴らさない）
+        if not load_settings()["timer_voice"] or (not self.resident and is_resident_running()):
+            return
+        for _, text in due:
+            self.voice_queue.put(text)
 
     def _draw_layout_icons(self):
         """各アイコンにマスの並びを描き、選択中のものを金色で強調する。"""
@@ -930,6 +992,7 @@ class App:
 
     def _apply_state(self, kind, payload):
         if kind == "game":
+            self._announce_time(payload)
             my_pos, enemies = enemies_from_game(payload, self.by_id_lower, self.by_name)
             if not enemies:
                 self._set_status("試合中（敵プレイヤー情報なし）")
@@ -944,6 +1007,8 @@ class App:
             self._render(enemies, my_pos)
             active = True
         else:
+            self.game_time = -1
+            self.announced.clear()
             if self.last_signature is not None:
                 self.last_signature = None
                 self.last_render = None
