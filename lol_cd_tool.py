@@ -276,10 +276,21 @@ TIMERS = [
     ("GA", "300", "復活CD"),
 ]
 
-# 試合時間の音声案内: (試合開始からの秒数, 読み上げる文)。
+# 試合時間の音声案内の節目（試合開始からの秒数）。
 # 主なオブジェクトの初出現（カニ・ドラゴン・ヴォイドクラブ・ヘラルド・バロン）と25/30分
-VOICE_TIMES = [(175, "2分55秒経過"), (300, "5分経過"), (480, "8分経過"), (900, "15分経過"),
-               (1200, "20分経過"), (1500, "25分経過"), (1800, "30分経過")]
+VOICE_MARKS = [175, 300, 480, 900, 1200, 1500, 1800]
+VOICE_LEAD_SEC = 90  # 各節目のこの秒数前（1分半前）にも、その時点の経過時間を読み上げる
+
+
+def elapsed_text(sec):
+    """175 → '2分55秒経過'、300 → '5分経過'。"""
+    m, s = divmod(sec, 60)
+    return f"{m}分{s}秒経過" if s else f"{m}分経過"
+
+
+# (試合開始からの秒数, 読み上げる文) を時刻順に
+VOICE_TIMES = sorted((t, elapsed_text(t)) for t in
+                     {*VOICE_MARKS, *(m - VOICE_LEAD_SEC for m in VOICE_MARKS)})
 VOICE_LATE_SEC = 10  # 節目からこれ以上過ぎていたら読まない（途中参加・再接続で一斉に読まない）
 
 
@@ -800,8 +811,8 @@ class App:
     def _toggle_voice(self):
         self.settings = {**load_settings(), "timer_voice": self.voice_var.get()}
         save_settings(self.settings)
-        self._flash("タイマー音声: " + ("オン（" + "・".join(t.replace("経過", "") for _, t in VOICE_TIMES)
-                                       + " で読み上げ）" if self.voice_var.get() else "オフ"))
+        self._flash("タイマー音声: " + ("オン（" + "・".join(elapsed_text(m).replace("経過", "") for m in VOICE_MARKS)
+                                       + " と、その1分半前に読み上げ）" if self.voice_var.get() else "オフ"))
 
     def _voice_worker(self):
         while True:
