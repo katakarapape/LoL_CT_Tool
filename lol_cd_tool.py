@@ -291,7 +291,8 @@ def elapsed_text(sec):
 # (試合開始からの秒数, 読み上げる文) を時刻順に
 VOICE_TIMES = sorted((t, elapsed_text(t)) for t in
                      {*VOICE_MARKS, *(m - VOICE_LEAD_SEC for m in VOICE_MARKS)})
-VOICE_LATE_SEC = 10  # 節目からこれ以上過ぎていたら読まない（途中参加・再接続で一斉に読まない）
+# 途中参加・再接続（前回の試合時間が無い）とき、節目からこれ以上過ぎていたら読まない（一斉に読まない）
+VOICE_LATE_SEC = 10
 
 
 def speak(text):
@@ -303,9 +304,15 @@ def speak(text):
 
 
 def due_voice_lines(prev_time, now, announced):
-    """前回の試合時間 prev_time から now までに来た節目のうち、まだ読んでおらず遅すぎないもの。"""
-    return [(sec, text) for sec, text in VOICE_TIMES
-            if sec not in announced and prev_time < sec <= now and now - sec < VOICE_LATE_SEC]
+    """前回の試合時間 prev_time から now までに来た節目のうち、まだ読んでいないもの。
+
+    試合を追えている間は、練習ツールの早送りで飛び越えた節目も読む（一度に複数越えたら最後の1つだけ）。
+    途中参加・再接続（prev_time < 0）では遅すぎる節目は読まない。
+    """
+    due = [(sec, text) for sec, text in VOICE_TIMES
+           if sec not in announced and prev_time < sec <= now
+           and (prev_time >= 0 or now - sec < VOICE_LATE_SEC)]
+    return due[-1:]
 
 
 # --- 通常攻撃の射程 -------------------------------------------------------------
