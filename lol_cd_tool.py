@@ -50,8 +50,9 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # update_days: 何日ごとに GitHub の新バージョンを確認するか（0=確認しない）
 # spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=横4列 / "column"=縦4行
 # timer_voice: 試合時間の節目（VOICE_TIMES）を音声で知らせるか
+# voice_advance: タイマー音声を節目より何秒早く読み上げるか（0.0〜VOICE_ADVANCE_MAX）
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
-                    "timer_voice": False}
+                    "timer_voice": False, "voice_advance": 0.0}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -293,6 +294,7 @@ VOICE_TIMES = sorted((t, elapsed_text(t)) for t in
                      {*VOICE_MARKS, *(m - VOICE_LEAD_SEC for m in VOICE_MARKS)})
 # 途中参加・再接続（前回の試合時間が無い）とき、節目からこれ以上過ぎていたら読まない（一斉に読まない）
 VOICE_LATE_SEC = 10
+VOICE_ADVANCE_MAX = 60.0
 
 
 def speak(text):
@@ -650,6 +652,7 @@ class App:
         self.updated_to = None  # 更新済みのバージョン（同じ起動中に二重に差し替えない）
         self.game_time = -1  # 前回ポーリング時の試合時間（秒）。試合外は -1
         self.announced = set()  # この試合で読み上げ済みの節目（VOICE_TIMES の秒数）
+        self.voice_gen = 0  # 試合が変わるたびに増やす（前の試合で予約した読み上げを無効にする）
         self.voice_queue = queue.Queue()  # 読み上げ待ちの文（重ならないよう1件ずつ読む）
 
         root.title(f"LoL 敵スキルCD一覧 v{VERSION}")
@@ -701,9 +704,22 @@ class App:
         self.client_var = tk.BooleanVar(value=self.settings["show_on"] == "client")
         tk.Checkbutton(opts, text="クライアント起動時から表示（常駐時）", variable=self.client_var,
                        command=self._toggle_show_on, **check).pack(side="left")
+        # 2段目: タイマー音声（左）と更新の確認（右）。1段に並べると幅に収まらない
+        opts = tk.Frame(root, bg=BG)
+        opts.pack(fill="x", padx=6)
         self.voice_var = tk.BooleanVar(value=self.settings["timer_voice"])
         tk.Checkbutton(opts, text="タイマー音声", variable=self.voice_var,
                        command=self._toggle_voice, **check).pack(side="left")
+        self.advance_var = tk.StringVar(value=f"{self.settings['voice_advance']:.1f}")
+        advance = tk.Spinbox(opts, from_=0.0, to=VOICE_ADVANCE_MAX, increment=0.1, format="%.1f",
+                             width=4, textvariable=self.advance_var, command=self._set_voice_advance,
+                             bg=CARD_BG, fg=FG, buttonbackground=CARD_BG, insertbackground=FG,
+                             relief="flat", font=("Consolas", 9))
+        advance.pack(side="left")
+        advance.bind("<Return>", lambda e: self._set_voice_advance())
+        advance.bind("<FocusOut>", lambda e: self._set_voice_advance())
+        tk.Label(opts, text="秒早く", bg=BG, fg=SUB,
+                 font=("Yu Gothic UI", 9)).pack(side="left", padx=(2, 0))
         labels = dict(UPDATE_DAY_CHOICES)
         self.update_var = tk.StringVar(
             value=labels.get(self.settings["update_days"], f"{self.settings['update_days']}日ごと"))
@@ -821,6 +837,18 @@ class App:
         self._flash("タイマー音声: " + ("オン（" + "・".join(elapsed_text(m).replace("経過", "") for m in VOICE_MARKS)
                                        + " と、その1分半前に読み上げ）" if self.voice_var.get() else "オフ"))
 
+    def _set_voice_advance(self):
+        """入力された秒数を 0.0〜VOICE_ADVANCE_MAX に収めて保存（数値でなければ元に戻す）。"""
+        try:
+            sec = min(max(round(float(self.advance_var.get()), 1), 0.0), VOICE_ADVANCE_MAX)
+        except ValueError:
+            sec = load_settings()["voice_advance"]
+        self.advance_var.set(f"{sec:.1f}")
+        if sec != load_settings()["voice_advance"]:
+            self.settings = {**load_settings(), "voice_advance": sec}
+            save_settings(self.settings)
+            self._flash(f"タイマー音声: 節目の {sec:.1f} 秒前に読み上げ")
+
     def _voice_worker(self):
         while True:
             text = self.voice_queue.get()
@@ -830,22 +858,38 @@ class App:
                 pass  # 音声合成が使えない環境でも本体は動かす
 
     def _announce_time(self, game):
-        """試合時間が節目を越えたら読み上げる（タイマー音声がオンのときだけ）。"""
+        """試合時間が節目を越えたら読み上げる（タイマー音声がオンのときだけ）。
+
+        設定の秒数（voice_advance）だけ早めた時刻で判定する。ポーリング間隔（POLL_MS）より
+        細かく合わせるため、次のポーリングまでに来る節目はその時刻に予約して読む。
+        """
         now = (game.get("gameData") or {}).get("gameTime")
         if now is None:
             return
         if now < self.game_time:  # 時間が戻った = 別の試合
             self.announced.clear()
-        due = due_voice_lines(self.game_time, now, self.announced)
+            self.voice_gen += 1
+        # 設定はファイルから読み直す（別プロセスのウィンドウでの変更を常駐側にも反映）
+        advance = load_settings()["voice_advance"]
+        prev = self.game_time + advance if self.game_time >= 0 else -1
         self.game_time = now
-        if not due:
+        now += advance
+        self._speak_lines(due_voice_lines(prev, now, self.announced))
+        gen = self.voice_gen
+        for sec, text in VOICE_TIMES:
+            if sec not in self.announced and now < sec <= now + POLL_MS / 1000:
+                self.root.after(int((sec - now) * 1000),
+                                lambda s=sec, t=text: gen == self.voice_gen
+                                and s not in self.announced and self._speak_lines([(s, t)]))
+
+    def _speak_lines(self, lines):
+        if not lines:
             return
-        self.announced.update(sec for sec, _ in due)
-        # 設定はファイルから読み直す（別プロセスのウィンドウでの切り替えを常駐側にも反映）。
+        self.announced.update(sec for sec, _ in lines)
         # 常駐と手動起動のウィンドウが同時に動いているときは常駐側だけが読む（二重に鳴らさない）
         if not load_settings()["timer_voice"] or (not self.resident and is_resident_running()):
             return
-        for _, text in due:
+        for _, text in lines:
             self.voice_queue.put(text)
 
     def _draw_layout_icons(self):
@@ -1027,6 +1071,7 @@ class App:
         else:
             self.game_time = -1
             self.announced.clear()
+            self.voice_gen += 1
             if self.last_signature is not None:
                 self.last_signature = None
                 self.last_render = None
