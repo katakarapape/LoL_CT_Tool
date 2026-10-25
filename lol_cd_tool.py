@@ -328,13 +328,41 @@ RANGE_SCALING = {
 }
 
 
+# 形態が変わるチャンピオン。Data Dragon のスキル名は「A/B」と両形態を併記しているが、
+# 射程は片方（A）の形態の値しか無いので、もう一方（B）の形態の射程を固定で持つ。
+# LoL Wiki の各記事より（2026-10 時点）。'' は射程なし（自身対象など）
+# チャンピオンID → (もう一方の形態名, その形態の通常攻撃射程, {スキルキー: 射程})
+ALT_FORMS = {
+    "Jayce": ("キャノン", 500, {"Q": "1050", "W": "", "E": "650"}),
+    "Elise": ("蜘蛛", 125, {"Q": "475", "W": "", "E": "825"}),
+    "Nidalee": ("クーガー", 125, {"Q": "", "W": "375", "E": ""}),
+    "Gnar": ("メガ", 175, {"Q": "1150", "W": "550", "E": "675"}),
+}
+
+
 def attack_range_text(champ):
-    """'射程 550' / レベルで伸びる場合は '射程 550→718 (Lv18)'。"""
+    """'射程 550' / レベルで伸びる場合は '射程 550→718 (Lv18)'。
+    形態が変わる場合はもう一方の形態の射程を ' / 蜘蛛 125' のように添える。"""
     scaling = RANGE_SCALING.get(champ["id"])
     if scaling:
         lv1, top, lv = scaling
-        return f"射程 {lv1}→{top} (Lv{lv})"
-    return f"射程 {round(champ['stats']['attackrange'])}"
+        text = f"射程 {lv1}→{top} (Lv{lv})"
+    else:
+        text = f"射程 {round(champ['stats']['attackrange'])}"
+    alt = ALT_FORMS.get(champ["id"])
+    if alt:
+        text += f" / {alt[0]} {alt[1]}"
+    return text
+
+
+def champ_spell_range_text(champ, key, spell):
+    """スキルの射程。形態が変わる場合はスキル名の『A/B』に合わせて '600/1050' と並べる（無い側は '—'）。"""
+    own = spell_range_text(spell.get("rangeBurn", ""))
+    alt = ALT_FORMS.get(champ["id"])
+    if not alt or key not in alt[2]:
+        return own
+    other = spell_range_text(alt[2][key])
+    return f"{own or '—'}/{other or '—'}" if own or other else ""
 
 
 # --- パッシブ説明 (LoL JP Wiki) ------------------------------------------------
@@ -1184,7 +1212,7 @@ class App:
             parts = [f"P {passive_cd}"] if passive_cd else []
             for key, spell in zip(SPELL_KEYS, champ["spells"]):
                 part = f"{key} {cd_range(spell.get('cooldownBurn', ''))}"
-                spell_range = spell_range_text(spell.get("rangeBurn", ""))
+                spell_range = champ_spell_range_text(champ, key, spell)
                 parts.append(f"{part}({spell_range})" if spell_range else part)
             summary = tk.Label(card, text="   ".join(parts), bg=bg, fg=PASSIVE_FG, anchor="w",
                                cursor="hand2", font=("Consolas", 10))
@@ -1236,7 +1264,7 @@ class App:
             cd_text = cd if cd and cd != "0" else "—"
             key_label = tk.Label(grid, text=key, bg=bg, fg=KEY_FG, width=2, pady=0,
                                  font=("Consolas", 10, "bold"))
-            spell_range = spell_range_text(spell.get("rangeBurn", ""))
+            spell_range = champ_spell_range_text(champ, key, spell)
             name_text = f"{spell['name']}  {spell_range}" if spell_range else spell["name"]
             name_label = tk.Label(grid, text=name_text, bg=bg, fg=FG, anchor="w", pady=0,
                                   font=("Yu Gothic UI", 9))
