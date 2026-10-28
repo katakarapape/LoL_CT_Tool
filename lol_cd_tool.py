@@ -51,8 +51,9 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # spell_layout: スキルCDの並び "grid"=Q W / E R の2×2 / "row"=横4列 / "column"=縦4行
 # timer_voice: 試合時間の節目（VOICE_TIMES）を音声で知らせるか
 # voice_advance: タイマー音声を節目より何秒早く読み上げるか（0.0〜VOICE_ADVANCE_MAX）
+# summoner_minsec: サモナースペルのCDを '300' ではなく '5:00'（分:秒）で表示するか
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
-                    "timer_voice": False, "voice_advance": 0.0}
+                    "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -259,6 +260,17 @@ def load_summoners(version):
         except Exception:
             continue  # アイコン取得に失敗したスペルだけ飛ばす
     return result
+
+
+def minsec_text(cd):
+    """'300' → '5:00'、'330→240' → '5:30→4:00'。数値でない部分（'—' など）はそのまま。"""
+    def one(v):
+        try:
+            m, s = divmod(round(float(v)), 60)
+        except ValueError:
+            return v
+        return f"{m}:{s:02d}"
+    return "→".join(one(v) for v in cd.split("→"))
 
 
 # --- オブジェクト・アイテムのタイマー -------------------------------------------
@@ -732,6 +744,9 @@ class App:
         self.client_var = tk.BooleanVar(value=self.settings["show_on"] == "client")
         tk.Checkbutton(opts, text="クライアント起動時から表示（常駐時）", variable=self.client_var,
                        command=self._toggle_show_on, **check).pack(side="left")
+        self.minsec_var = tk.BooleanVar(value=self.settings["summoner_minsec"])
+        tk.Checkbutton(opts, text="スペルCDを分:秒で", variable=self.minsec_var,
+                       command=self._toggle_minsec, **check).pack(side="left")
         # 2段目: タイマー音声（左）と更新の確認（右）。1段に並べると幅に収まらない
         opts = tk.Frame(root, bg=BG)
         opts.pack(fill="x", padx=6)
@@ -768,6 +783,7 @@ class App:
         self.summ_frame = tk.Frame(root, bg=CARD_BG)
         self.summ_frame.pack(fill="x", padx=10, pady=(4, 0))
         self.summ_icons = []  # PhotoImage の参照を保持（GC で消えないように）
+        self.summoners = []  # 表示の切り替えで作り直すため load_summoners の結果を保持
         self._build_timer_bar()
 
         container = tk.Frame(root, bg=BG)
@@ -858,6 +874,11 @@ class App:
     def _toggle_show_on(self):
         self.settings["show_on"] = "client" if self.client_var.get() else "champselect"
         save_settings(self.settings)
+
+    def _toggle_minsec(self):
+        self.settings = {**load_settings(), "summoner_minsec": self.minsec_var.get()}
+        save_settings(self.settings)
+        self._build_summoner_bar(self.summoners)
 
     def _toggle_voice(self):
         self.settings = {**load_settings(), "timer_voice": self.voice_var.get()}
@@ -961,6 +982,8 @@ class App:
         for w in self.summ_frame.winfo_children():
             w.destroy()
         self.summ_icons = []
+        self.summoners = spells
+        minsec = self.settings["summoner_minsec"]
         for col, (sid, name, cd, sub, icon_path) in enumerate(spells):
             self.summ_frame.columnconfigure(col, weight=1, uniform="summ")
             cell = tk.Frame(self.summ_frame, bg=CARD_BG)
@@ -972,7 +995,7 @@ class App:
             except tk.TclError:
                 pass
             tk.Label(cell, text=name, bg=CARD_BG, fg=FG, font=("Yu Gothic UI", 8)).pack()
-            tk.Label(cell, text=cd, bg=CARD_BG, fg=GOLD, pady=0,
+            tk.Label(cell, text=minsec_text(cd) if minsec else cd, bg=CARD_BG, fg=GOLD, pady=0,
                      font=("Consolas", 10, "bold")).pack()
             if sub:
                 tk.Label(cell, text=sub, bg=CARD_BG, fg=SUB, pady=0,
