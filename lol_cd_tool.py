@@ -52,8 +52,10 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # timer_voice: 試合時間の節目（VOICE_TIMES）を音声で知らせるか
 # voice_advance: タイマー音声を節目より何秒早く読み上げるか（0.0〜VOICE_ADVANCE_MAX）
 # summoner_minsec: サモナースペルのCDを '300' ではなく '5:00'（分:秒）で表示するか
+# timer_minsec: タイマー欄の秒で書いた時間（バフ・アイテム）を '180' ではなく '3:00' で表示するか
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
-                    "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False}
+                    "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False,
+                    "timer_minsec": False}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -274,7 +276,8 @@ def minsec_text(cd):
 
 
 # --- オブジェクト・アイテムのタイマー -------------------------------------------
-# (名前, 時間, 補足)。Data Dragon に無いので固定値。
+# (名前, 時間, 補足)。Data Dragon に無いので固定値。時間は試合時刻なら '分:秒'、長さなら秒で書く
+# （秒のものは設定 timer_minsec で分:秒表示に切り替わる）。
 # LoL Wiki の各記事より（2026-10 / パッチ 16.20 時点）。変わったらここを書き換える
 TIMERS = [
     ("カニ", "2:55", "川の両側\n再出現 2:30"),
@@ -747,6 +750,9 @@ class App:
         self.minsec_var = tk.BooleanVar(value=self.settings["summoner_minsec"])
         tk.Checkbutton(opts, text="スペルCDを分:秒で", variable=self.minsec_var,
                        command=self._toggle_minsec, **check).pack(side="left")
+        self.timer_minsec_var = tk.BooleanVar(value=self.settings["timer_minsec"])
+        tk.Checkbutton(opts, text="バフ・アイテムを分:秒で", variable=self.timer_minsec_var,
+                       command=self._toggle_timer_minsec, **check).pack(side="left")
         # 2段目: タイマー音声（左）と更新の確認（右）。1段に並べると幅に収まらない
         opts = tk.Frame(root, bg=BG)
         opts.pack(fill="x", padx=6)
@@ -784,6 +790,8 @@ class App:
         self.summ_frame.pack(fill="x", padx=10, pady=(4, 0))
         self.summ_icons = []  # PhotoImage の参照を保持（GC で消えないように）
         self.summoners = []  # 表示の切り替えで作り直すため load_summoners の結果を保持
+        self.timer_frame = tk.Frame(root, bg=CARD_BG)
+        self.timer_frame.pack(fill="x", padx=10, pady=(4, 0))
         self._build_timer_bar()
 
         container = tk.Frame(root, bg=BG)
@@ -879,6 +887,11 @@ class App:
         self.settings = {**load_settings(), "summoner_minsec": self.minsec_var.get()}
         save_settings(self.settings)
         self._build_summoner_bar(self.summoners)
+
+    def _toggle_timer_minsec(self):
+        self.settings = {**load_settings(), "timer_minsec": self.timer_minsec_var.get()}
+        save_settings(self.settings)
+        self._build_timer_bar()
 
     def _toggle_voice(self):
         self.settings = {**load_settings(), "timer_voice": self.voice_var.get()}
@@ -1002,9 +1015,13 @@ class App:
                          font=("Yu Gothic UI", 7)).pack()
 
     def _build_timer_bar(self):
-        frame = tk.Frame(self.root, bg=CARD_BG)
-        frame.pack(fill="x", padx=10, pady=(4, 0))
+        frame = self.timer_frame
+        for w in frame.winfo_children():
+            w.destroy()
+        minsec = self.settings["timer_minsec"]
         for col, (name, value, sub) in enumerate(TIMERS):
+            if minsec and ":" not in value:
+                value, sub = minsec_text(value), sub.replace("(秒)", "")
             frame.columnconfigure(col, weight=1, uniform="timer")
             cell = tk.Frame(frame, bg=CARD_BG)
             cell.grid(row=0, column=col, sticky="n", pady=4)
