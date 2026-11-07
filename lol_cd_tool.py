@@ -220,7 +220,7 @@ EXTRA_SUMMONERS = {
     "UnleashedTeleport": {"name": "真TP", "cd": "330→240", "sub": "10分〜\nLv1→10"},
     "QuestTeleport": {"name": "クエストTP", "cd": "390", "sub": "TP持ちは\n300→210"},
 }
-SUMMONER_SUB = {"SummonerTeleport": "10分で\n真TPに", "SummonerSmite": "チャージ式\n最大2・間隔15"}
+SUMMONER_SUB = {"SummonerTeleport": "10分で\n真TPに", "SummonerSmite": "チャージ式\n最大2\n間隔15"}
 # Data Dragon の cooldownBurn がチャージ時間でないスペルの上書き（スマイトの 15 は連続使用の間隔）。
 # LoL Wiki の Smite 記事より（2026-10 / パッチ 16.20 時点）。変わったらここを書き換える
 SUMMONER_CD_OVERRIDE = {"SummonerSmite": "90"}
@@ -1008,7 +1008,9 @@ class App:
             except tk.TclError:
                 pass
             tk.Label(cell, text=name, bg=CARD_BG, fg=FG, font=("Yu Gothic UI", 8)).pack()
-            tk.Label(cell, text=minsec_text(cd) if minsec else cd, bg=CARD_BG, fg=GOLD, pady=0,
+            # '5:30→4:00' は1行だと列幅が広がり、狭いウィンドウで右の列が切れるので2行に分ける
+            cd_text = (minsec_text(cd) if minsec else cd).replace("→", "→\n")
+            tk.Label(cell, text=cd_text, bg=CARD_BG, fg=GOLD, pady=0,
                      font=("Consolas", 10, "bold")).pack()
             if sub:
                 tk.Label(cell, text=sub, bg=CARD_BG, fg=SUB, pady=0,
