@@ -1236,8 +1236,8 @@ class App:
                      anchor="w").pack(fill="x", padx=8, pady=(0, 6))
             return
         head.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, cid))
-        tk.Label(head_row, text=attack_range_text(champ), bg=bg, fg=SUB,
-                 font=("Yu Gothic UI", 9)).pack(side="right")
+        tk.Label(head_row, text=f"{attack_range_text(champ)}  MS {round(champ['stats']['movespeed'])}",
+                 bg=bg, fg=SUB, font=("Yu Gothic UI", 9)).pack(side="right")
 
         # P: JP Wiki の説明文をそのまま表示（取得できなければ Data Dragon の公式説明文）
         if cid not in self.passives:
