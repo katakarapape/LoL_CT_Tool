@@ -370,9 +370,46 @@ def attack_range_text(champ):
     return text
 
 
+# 通常攻撃を強化する・射程を伸ばすスキル。Data Dragon の rangeBurn は実際の通常攻撃の射程と
+# 合わない（レネクトンW=300、ナサスQ=255 など）ので、強化中の通常攻撃の射程（合計値）を固定で持ち
+# 'AA175' のように表示する。LoL Wiki の各記事より（2026-11 / V26.22 時点）
+# チャンピオンID → {スキルキー: (強化中のAA射程, Data Dragon の射程も残すか)}
+#   残す: スキル自体に意味のある射程があるもの（ニーラQの斬撃、エコーEのダッシュなど）
+AA_EMPOWER = {
+    "Renekton": {"W": ("175", False), "R": ("150", False)},
+    "Jax": {"W": ("175", False)},
+    "Nasus": {"Q": ("175", False), "R": ("175", True)},
+    "Kassadin": {"W": ("200", False)},
+    "MonkeyKing": {"Q": ("310→350", False)},
+    "KogMaw": {"W": ("630→710", False)},
+    "Twitch": {"R": ("850", False)},
+    "Jinx": {"Q": ("625→725", False)},
+    "Nilah": {"Q": ("350", True)},
+    "Yorick": {"Q": ("225", False)},
+    "Illaoi": {"W": ("350", False)},
+    "Ekko": {"E": ("425", True)},
+    "Darius": {"W": ("200", False)},
+    "Trundle": {"Q": ("200", False)},
+    "Leona": {"Q": ("175", False)},
+    "Rengar": {"Q": ("150", False)},
+    "Volibear": {"Q": ("175", False)},
+    "Shyvana": {"Q": ("200", False)},
+    "Sett": {"Q": ("175", False)},
+    "Camille": {"Q": ("175", False)},
+    "Vi": {"E": ("175", False)},
+    "Udyr": {"Q": ("175", False)},
+    "Hecarim": {"E": ("225〜425", False)},  # 移動距離に応じて伸びる
+}
+
+
 def champ_spell_range_text(champ, key, spell):
-    """スキルの射程。形態が変わる場合はスキル名の『A/B』に合わせて '600/1050' と並べる（無い側は '—'）。"""
+    """スキルの射程。形態が変わる場合はスキル名の『A/B』に合わせて '600/1050' と並べる（無い側は '—'）。
+    通常攻撃を強化するスキルは強化中のAA射程を 'AA175' / '600 AA350' のように示す。"""
     own = spell_range_text(spell.get("rangeBurn", ""))
+    aa = AA_EMPOWER.get(champ["id"], {}).get(key)
+    if aa:
+        aa_text, keep_own = aa
+        return f"{own} AA{aa_text}" if keep_own and own else f"AA{aa_text}"
     alt = ALT_FORMS.get(champ["id"])
     if not alt or key not in alt[2]:
         return own
