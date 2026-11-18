@@ -404,10 +404,12 @@ AA_EMPOWER = {
 }
 
 
-# 長押しでチャージして射程が伸びるスキル。Data Dragon の rangeBurn は片方の値しか持たないので、
-# 最短（タップ）〜最長（フルチャージ）を固定で持つ。LoL Wiki の各記事より（2026-11 / V26.23 時点）
-# チャンピオンID → {スキルキー: '最短〜最長'}
-CHARGE_RANGE = {
+# 同じスキルで射程が変わるもの。Data Dragon の rangeBurn は1つの値しか持たないので固定で持つ。
+# LoL Wiki の各記事より（2026-11 / V26.23 時点。Wiki に数値が無いものは CommunityDragon のゲームデータ）
+#   長押しチャージ: '575〜1200'（最短〜最長）
+#   段階・対象で変わる: '450 Q3 1050'（通常 → 3段目）、'250 味方700' など
+# チャンピオンID → {スキルキー: 表示文字列}
+SPECIAL_RANGE = {
     "Pantheon": {"Q": "575〜1200"},
     "Varus": {"Q": "895〜1595"},
     "Xerath": {"Q": "700〜1450"},
@@ -418,17 +420,25 @@ CHARGE_RANGE = {
     "Zac": {"E": "最大1200→1800"},  # 最短は Wiki に記載なし。最長がランクで伸びる（DDragon は 300）
     # W は表示範囲が 250→600 に伸びる（CommunityDragon の castRange / mCastRangeGrowthMax）
     # Q はチャージではないが、3段目の衝撃波だけ射程が違う（RectangleLength 465 / Q3Missile 表示 800）
-    "KSante": {"Q": "465 Q3 800", "W": "250〜600"},
+    # E は場所指定のダッシュ 250、味方を指定すると 700（KSanteEAllyDash の DashRange）
+    "KSante": {"Q": "465 Q3 800", "W": "250〜600", "E": "250 味方700"},
+    "Yone": {"Q": "450 Q3 1050"},
+    "Yasuo": {"Q": "450 Q3 1150"},
+    "Riven": {"R": "R2 1100"},  # 再発動の Wind Slash。Q の3段目は範囲が広がるが数値の記載なし
+    # Q1 は 625 の長方形、Q2 は 475、Q3 は 200 先を中心にした半径 300 の円（先端まで 500）
+    "Aatrox": {"Q": "Q1 625 Q2 475 Q3 500"},
+    "Akali": {"E": "825 E2 全域"},  # 再発動はマークした敵へ距離無制限でダッシュ
+    "LeeSin": {"Q": "1200 Q2 1250", "E": "450 E2 550"},
 }
 
 
 def champ_spell_range_text(champ, key, spell):
     """スキルの射程。形態が変わる場合はスキル名の『A/B』に合わせて '600/1050' と並べる（無い側は '—'）。
     通常攻撃を強化するスキルは強化中のAA射程を 'AA175' / '600 AA350' のように示す。
-    長押しで射程が伸びるスキルは '575〜1200'（最短〜最長）。"""
-    charge = CHARGE_RANGE.get(champ["id"], {}).get(key)
-    if charge:
-        return charge
+    長押しで射程が伸びる・段階で射程が変わるスキルは SPECIAL_RANGE の表示文字列。"""
+    special = SPECIAL_RANGE.get(champ["id"], {}).get(key)
+    if special:
+        return special
     own = spell_range_text(spell.get("rangeBurn", ""))
     aa = AA_EMPOWER.get(champ["id"], {}).get(key)
     if aa:
