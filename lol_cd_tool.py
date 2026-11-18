@@ -81,6 +81,8 @@ SPELL_LAYOUTS = [("grid", "2×2（Q W / E R）", [(0, 0), (1, 0), (0, 1), (1, 1)
 BG = "#10141c"
 CARD_BG = "#1a2130"
 CARD_HL = "#2a2a12"
+CARD_ME = "#14283a"  # 自分のカード
+ME_FG = "#7fd0ff"
 FG = "#e6e6e6"
 SUB = "#8a93a6"
 GOLD = "#f0c040"
@@ -402,9 +404,31 @@ AA_EMPOWER = {
 }
 
 
+# 長押しでチャージして射程が伸びるスキル。Data Dragon の rangeBurn は片方の値しか持たないので、
+# 最短（タップ）〜最長（フルチャージ）を固定で持つ。LoL Wiki の各記事より（2026-11 / V26.23 時点）
+# チャンピオンID → {スキルキー: '最短〜最長'}
+CHARGE_RANGE = {
+    "Pantheon": {"Q": "575〜1200"},
+    "Varus": {"Q": "895〜1595"},
+    "Xerath": {"Q": "700〜1450"},
+    "Vi": {"Q": "250〜725"},
+    "Poppy": {"R": "500〜1200"},
+    "Pyke": {"Q": "400〜1100"},
+    "Sion": {"Q": "500〜850"},
+    "Zac": {"E": "最大1200→1800"},  # 最短は Wiki に記載なし。最長がランクで伸びる（DDragon は 300）
+    # W は表示範囲が 250→600 に伸びる（CommunityDragon の castRange / mCastRangeGrowthMax）
+    # Q はチャージではないが、3段目の衝撃波だけ射程が違う（RectangleLength 465 / Q3Missile 表示 800）
+    "KSante": {"Q": "465 Q3 800", "W": "250〜600"},
+}
+
+
 def champ_spell_range_text(champ, key, spell):
     """スキルの射程。形態が変わる場合はスキル名の『A/B』に合わせて '600/1050' と並べる（無い側は '—'）。
-    通常攻撃を強化するスキルは強化中のAA射程を 'AA175' / '600 AA350' のように示す。"""
+    通常攻撃を強化するスキルは強化中のAA射程を 'AA175' / '600 AA350' のように示す。
+    長押しで射程が伸びるスキルは '575〜1200'（最短〜最長）。"""
+    charge = CHARGE_RANGE.get(champ["id"], {}).get(key)
+    if charge:
+        return charge
     own = spell_range_text(spell.get("rangeBurn", ""))
     aa = AA_EMPOWER.get(champ["id"], {}).get(key)
     if aa:
@@ -587,6 +611,11 @@ def resolve_champion(player, by_id_lower, by_name):
     return by_name.get(name) or by_id_lower.get(name.lower().replace(" ", "").replace("'", ""))
 
 
+def self_key(champ_id):
+    """自分のカードの開閉状態のキー。ミラーマッチでも敵カード（チャンピオンID）と区別する。"""
+    return f"me:{champ_id}"
+
+
 def player_id(p):
     return p.get("riotId") or p.get("summonerName") or ""
 
@@ -602,7 +631,10 @@ def sort_enemies(enemies, my_pos):
 
 
 def enemies_from_game(game, by_id_lower, by_name):
-    """Live Client の allgamedata から (自分のposition, 敵リスト)。"""
+    """Live Client の allgamedata から (自分のposition, 敵リスト, 自分)。
+
+    自分は (champ, position, fallback_name)。見つからなければ None。
+    """
     players = game.get("allPlayers", [])
     active = game.get("activePlayer", {})
     me_ids = {active.get("riotId"), active.get("summonerName")} - {None, ""}
@@ -612,11 +644,16 @@ def enemies_from_game(game, by_id_lower, by_name):
     enemies = [(resolve_champion(p, by_id_lower, by_name), p.get("position", ""),
                 p.get("championName", "?"))
                for p in players if p.get("team") != my_team]
-    return my_pos, sort_enemies(enemies, my_pos)
+    mine = ((resolve_champion(me, by_id_lower, by_name), my_pos, me.get("championName", "?"))
+            if me else None)
+    return my_pos, sort_enemies(enemies, my_pos), mine
 
 
 def enemies_from_champ_select(session, by_key):
-    """LCU の champ-select session から (自分のposition, 公開済みの敵リスト, 敵の人数)。"""
+    """LCU の champ-select session から (自分のposition, 公開済みの敵リスト, 敵の人数, 自分)。
+
+    自分は (champ, position, name)。ピック確定前はホバー中のチャンピオン、未選択なら None。
+    """
     me = next((p for p in session.get("myTeam", [])
                if p.get("cellId") == session.get("localPlayerCellId")), {})
     my_pos = LCU_POSITION.get(me.get("assignedPosition", ""), "")
@@ -626,7 +663,10 @@ def enemies_from_champ_select(session, by_key):
         champ = by_key.get(str(p.get("championId", 0)))
         if champ:
             enemies.append((champ, LCU_POSITION.get(p.get("assignedPosition", ""), ""), champ["name"]))
-    return my_pos, sort_enemies(enemies, my_pos), len(their)
+    my_champ = (by_key.get(str(me.get("championId") or 0))
+                or by_key.get(str(me.get("championPickIntent") or 0)))
+    mine = (my_champ, my_pos, my_champ["name"]) if my_champ else None
+    return my_pos, sort_enemies(enemies, my_pos), len(their), mine
 
 
 # --- 常駐・スタートアップ登録 ---------------------------------------------------
@@ -703,6 +743,152 @@ def uninstall_startup():
     return "スタートアップには登録されていません。"
 
 
+class TrayIcon:
+    """通知領域（タスクバー右下）のアイコン。外部ライブラリなしで Win32 API を直接使う。
+
+    専用スレッドで隠しウィンドウとメッセージループを動かし、左クリックで on_show、
+    右クリックメニューの「表示」「終了」で on_show / on_quit を呼ぶ（呼ばれるのはこのスレッド）。
+    """
+    WM_TRAY = 0x8000 + 1  # WM_APP + 1
+    CMD_SHOW, CMD_QUIT = 1, 2
+
+    def __init__(self, tooltip, on_show, on_quit):
+        self.tooltip = tooltip
+        self.on_show = on_show
+        self.on_quit = on_quit
+        self.hwnd = None
+        self.nid = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import ctypes
+        from ctypes import wintypes as wt
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        LRESULT = wt.LPARAM
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", wt.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int), ("hInstance", wt.HINSTANCE),
+                        ("hIcon", wt.HICON), ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
+                        ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
+
+        class NOTIFYICONDATAW(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT),
+                        ("uFlags", wt.UINT), ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON),
+                        ("szTip", wt.WCHAR * 128), ("dwState", wt.DWORD), ("dwStateMask", wt.DWORD),
+                        ("szInfo", wt.WCHAR * 256), ("uVersion", wt.UINT),
+                        ("szInfoTitle", wt.WCHAR * 64), ("dwInfoFlags", wt.DWORD),
+                        ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wt.HICON)]
+
+        user32.DefWindowProcW.restype = LRESULT
+        user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        user32.CreateWindowExW.restype = wt.HWND
+        user32.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HWND,
+                                           wt.HMENU, wt.HINSTANCE, wt.LPVOID]
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+        user32.CreatePopupMenu.restype = wt.HMENU
+        user32.AppendMenuW.argtypes = [wt.HMENU, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+        user32.SetMenuDefaultItem.argtypes = [wt.HMENU, wt.UINT, wt.UINT]
+        user32.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int, wt.HWND, wt.LPVOID]
+        user32.DestroyMenu.argtypes = [wt.HMENU]
+        user32.SetForegroundWindow.argtypes = [wt.HWND]
+        user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+        user32.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]
+        user32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+        user32.LoadIconW.restype = wt.HICON
+        user32.LoadIconW.argtypes = [wt.HINSTANCE, wt.LPVOID]
+        user32.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
+        shell32.ExtractIconW.restype = wt.HICON
+        shell32.ExtractIconW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, wt.UINT]
+        shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+        kernel32.GetModuleHandleW.restype = wt.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+
+        NIM_ADD, NIM_DELETE = 0, 2
+        NIF_MESSAGE, NIF_ICON, NIF_TIP = 1, 2, 4
+        WM_DESTROY, WM_CLOSE, WM_NULL = 0x0002, 0x0010, 0x0000
+        WM_LBUTTONUP, WM_RBUTTONUP = 0x0202, 0x0205
+        MF_STRING, MF_SEPARATOR = 0x0000, 0x0800
+        TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0002, 0x0100
+        taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")  # エクスプローラー再起動時
+
+        def show_menu(hwnd):
+            menu = user32.CreatePopupMenu()
+            user32.AppendMenuW(menu, MF_STRING, self.CMD_SHOW, "表示")
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            user32.AppendMenuW(menu, MF_STRING, self.CMD_QUIT, "終了")
+            user32.SetMenuDefaultItem(menu, self.CMD_SHOW, 0)
+            pt = wt.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            user32.SetForegroundWindow(hwnd)  # これがないとメニュー外クリックで閉じない
+            cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0,
+                                        hwnd, None)
+            user32.PostMessageW(hwnd, WM_NULL, 0, 0)
+            user32.DestroyMenu(menu)
+            if cmd == self.CMD_SHOW:
+                self.on_show()
+            elif cmd == self.CMD_QUIT:
+                self.on_quit()
+
+        def wndproc(hwnd, msg, wparam, lparam):
+            if msg == self.WM_TRAY:
+                event = lparam & 0xFFFF
+                if event == WM_LBUTTONUP:
+                    self.on_show()
+                elif event == WM_RBUTTONUP:
+                    show_menu(hwnd)
+                return 0
+            if msg == taskbar_created and self.nid is not None:
+                shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self.nid))
+                return 0
+            if msg == WM_DESTROY:
+                user32.PostQuitMessage(0)
+                return 0
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        self._wndproc = WNDPROC(wndproc)  # GC されないよう保持
+        hinst = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSW(lpfnWndProc=self._wndproc, hInstance=hinst,
+                       lpszClassName="LoL_CT_Tool_Tray")
+        user32.RegisterClassW(ctypes.byref(wc))
+        hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "LoL_CT_Tool_Tray", 0, 0, 0, 0, 0,
+                                      None, None, hinst, None)
+        if not hwnd:
+            return
+        # exe（または python）自身のアイコンを使う。取れなければ Windows 既定のアプリアイコン
+        icon = shell32.ExtractIconW(hinst, sys.executable, 0)
+        if not icon or icon == 1:
+            icon = user32.LoadIconW(None, ctypes.c_void_p(32512))  # IDI_APPLICATION
+        nid = NOTIFYICONDATAW(cbSize=ctypes.sizeof(NOTIFYICONDATAW), hWnd=hwnd, uID=1,
+                              uFlags=NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                              uCallbackMessage=self.WM_TRAY, hIcon=icon, szTip=self.tooltip[:127])
+        self._shell32, self._user32 = shell32, user32
+        self._NIM_DELETE, self._WM_CLOSE = NIM_DELETE, WM_CLOSE
+        self.nid, self.hwnd = nid, hwnd
+        shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+        msg = wt.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+    def stop(self):
+        """アイコンを消す（プロセス終了前に呼ぶ。呼ばないと終了後もアイコンが残って見える）。"""
+        if self.nid is None:
+            return
+        import ctypes
+        self._shell32.Shell_NotifyIconW(self._NIM_DELETE, ctypes.byref(self.nid))
+        self.nid = None
+        self._user32.PostMessageW(self.hwnd, self._WM_CLOSE, 0, 0)
+
+
 # --- UI -----------------------------------------------------------------------
 class App:
     def __init__(self, root, mock_path=None, resident=False):
@@ -721,7 +907,7 @@ class App:
         self.passive_pending = set()
         self.version = "?"
         self.last_signature = None
-        self.last_render = None  # (enemies, my_pos) パッシブ取得後の再描画用
+        self.last_render = None  # (enemies, my_pos, mine) パッシブ取得後の再描画用
         self.collapsed_cards = set()  # 折りたたんだチャンピオンID（既定は展開）
         self.expanded_passives = set()  # 説明文を開いたパッシブ（既定は折りたたみ）
         self.defaults_applied = set()  # 対面判明時の既定（対面以外は閉じる）を適用済みのID
@@ -729,6 +915,8 @@ class App:
         self.polling = False
         self.visible = True
         self.dismissed = False  # 常駐時、ユーザーが閉じたら次の試合まで出さない
+        self.pinned = False  # 常駐時、トレイから開いたら試合外でも×で閉じるまで出しておく
+        self.tray = None
         self.updated_to = None  # 更新済みのバージョン（同じ起動中に二重に差し替えない）
         self.game_time = -1  # 前回ポーリング時の試合時間（秒）。試合外は -1
         self.announced = set()  # この試合で読み上げ済みの節目（VOICE_TIMES の秒数）
@@ -849,6 +1037,9 @@ class App:
 
         if resident:
             self._set_visible(False)
+            self.tray = TrayIcon(f"LoL 敵スキルCD一覧 v{VERSION}（常駐中）",
+                                 on_show=lambda: self.results.put(("tray_show", None)),
+                                 on_quit=lambda: self.results.put(("tray_quit", None)))
 
         threading.Thread(target=self._load_data, daemon=True).start()
         threading.Thread(target=self._voice_worker, daemon=True).start()
@@ -870,11 +1061,14 @@ class App:
     def _on_close(self):
         if self.resident:
             self.dismissed = True
+            self.pinned = False
             self._set_visible(False)
         else:
             self._quit()
 
     def _quit(self):
+        if self.tray:
+            self.tray.stop()
         self.root.destroy()
 
     def _toggle_autostart(self):
@@ -1125,6 +1319,16 @@ class App:
                         threading.Thread(target=self._passive_worker, daemon=True).start()
                     self._set_status("試合待機中…")
                     self._schedule_poll()
+                elif kind == "tray_show":
+                    self.dismissed = False
+                    self.pinned = True
+                    self._set_visible(True)
+                    self.root.deiconify()  # 最小化・背面にあるときも前に出す
+                    self.root.lift()
+                    self.root.focus_force()
+                elif kind == "tray_quit":
+                    self._quit()
+                    return
                 elif kind == "summoners":
                     self._build_summoner_bar(payload)
                 elif kind == "updated":
@@ -1162,18 +1366,18 @@ class App:
     def _apply_state(self, kind, payload):
         if kind == "game":
             self._announce_time(payload)
-            my_pos, enemies = enemies_from_game(payload, self.by_id_lower, self.by_name)
+            my_pos, enemies, mine = enemies_from_game(payload, self.by_id_lower, self.by_name)
             if not enemies:
                 self._set_status("試合中（敵プレイヤー情報なし）")
             else:
                 self._set_status(f"試合中  |  敵 {len(enemies)} 人")
-                self._render(enemies, my_pos)
+                self._render(enemies, my_pos, mine)
             active = True
         elif kind == "champselect":
-            my_pos, enemies, total = enemies_from_champ_select(payload or {}, self.by_key)
+            my_pos, enemies, total, mine = enemies_from_champ_select(payload or {}, self.by_key)
             self._set_status(f"ピック画面  |  敵 {len(enemies)}/{total} 人公開"
                              + ("（試合開始時に全員表示）" if len(enemies) < total else ""))
-            self._render(enemies, my_pos)
+            self._render(enemies, my_pos, mine)
             active = True
         else:
             self.game_time = -1
@@ -1199,7 +1403,7 @@ class App:
         if self.resident:
             if not active:
                 self.dismissed = False  # 試合が終わったらリセット
-            self._set_visible(active and not self.dismissed)
+            self._set_visible((active and not self.dismissed) or self.pinned)
 
     def _set_status(self, msg):
         self.status.configure(text=f"パッチ {self.version}  |  {msg}")
@@ -1208,12 +1412,13 @@ class App:
         for w in self.inner.winfo_children():
             w.destroy()
 
-    def _render(self, enemies, my_pos):
-        signature = (my_pos, tuple((c["id"] if c else name, pos) for c, pos, name in enemies))
+    def _render(self, enemies, my_pos, mine=None):
+        signature = (my_pos, tuple((c["id"] if c else name, pos) for c, pos, name in enemies),
+                     ((mine[0]["id"] if mine[0] else mine[2]) if mine else None))
         if signature == self.last_signature:
             return
         self.last_signature = signature
-        self.last_render = (enemies, my_pos)
+        self.last_render = (enemies, my_pos, mine)
         # 対面が分かっていれば対面だけ開き、他は閉じる（各チャンピオン初回のみ。手動の開閉は尊重）
         if my_pos and any(pos == my_pos for _, pos, _ in enemies):
             for champ, pos, _ in enemies:
@@ -1221,11 +1426,13 @@ class App:
                     self.defaults_applied.add(champ["id"])
                     if pos != my_pos:
                         self.collapsed_cards.add(champ["id"])
-        for champ, _, _ in enemies:
+        for champ, _, _ in enemies + ([mine] if mine else []):
             if champ and champ["id"] not in self.passives and champ["id"] not in self.passive_pending:
                 self.passive_pending.add(champ["id"])
                 self.passive_requests.put(champ["id"])
         self._clear()
+        if mine:  # 自分のチャンピオンを一番上に
+            self._add_card(*mine, False, is_self=True)
         for champ, pos, name in enemies:
             self._add_card(champ, pos, name, bool(my_pos) and pos == my_pos)
 
@@ -1240,31 +1447,38 @@ class App:
 
     def _set_all(self, cards=None, passives=None):
         """表示中の全チャンピオンについて、カード/パッシブの開閉をまとめて切り替える。"""
-        ids = {c["id"] for c, _, _ in (self.last_render or ([], None))[0] if c}
+        enemies, _, mine = self.last_render or ([], None, None)
+        ids = {c["id"] for c, _, _ in enemies if c}
+        if mine and mine[0]:
+            ids.add(self_key(mine[0]["id"]))
         if cards is not None:
             self.collapsed_cards = set() if cards else set(ids)
         if passives is not None:
             self.expanded_passives = set(ids) if passives else set()
         self._rerender()
 
-    def _add_card(self, champ, position, fallback_name, is_lane):
-        bg = CARD_HL if is_lane else CARD_BG
-        card = tk.Frame(self.inner, bg=bg, highlightthickness=2 if is_lane else 0,
-                        highlightbackground=GOLD)
+    def _add_card(self, champ, position, fallback_name, is_lane, is_self=False):
+        bg = CARD_ME if is_self else CARD_HL if is_lane else CARD_BG
+        card = tk.Frame(self.inner, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
+                        highlightbackground=ME_FG if is_self else GOLD)
         card.pack(fill="x", padx=4, pady=2)
 
         pos = POSITION_LABEL.get(position, "")
         name = champ["name"] if champ else fallback_name
         cid = champ["id"] if champ else None
-        card_open = cid not in self.collapsed_cards
+        key = self_key(cid) if is_self and cid else cid  # 開閉状態のキー
+        card_open = key not in self.collapsed_cards
         header = f"{'▼' if card_open else '▶'} {name}"
         if pos:
             header += f"  [{pos}]"
         if is_lane:
             header += "  ★対面"
+        if is_self:
+            header += "  （自分）"
         head_row = tk.Frame(card, bg=bg)
         head_row.pack(fill="x", padx=8, pady=(2, 0))
-        head = tk.Label(head_row, text=header, bg=bg, fg=GOLD if is_lane else FG, anchor="w",
+        head = tk.Label(head_row, text=header, bg=bg,
+                        fg=ME_FG if is_self else GOLD if is_lane else FG, anchor="w",
                         cursor="hand2", font=("Yu Gothic UI", 11, "bold"))
         head.pack(side="left", fill="x", expand=True)
 
@@ -1272,7 +1486,7 @@ class App:
             tk.Label(card, text="チャンピオンデータが見つかりません", bg=bg, fg=SUB,
                      anchor="w").pack(fill="x", padx=8, pady=(0, 6))
             return
-        head.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, cid))
+        head.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, key))
         tk.Label(head_row, text=f"{attack_range_text(champ)}  MS {round(champ['stats']['movespeed'])}",
                  bg=bg, fg=SUB, font=("Yu Gothic UI", 9)).pack(side="right")
 
@@ -1296,7 +1510,7 @@ class App:
             summary = tk.Label(card, text="   ".join(parts), bg=bg, fg=PASSIVE_FG, anchor="w",
                                cursor="hand2", font=("Consolas", 10))
             summary.pack(fill="x", padx=(28, 8), pady=(0, 4))
-            summary.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, cid))
+            summary.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, key))
             return
 
         grid = tk.Frame(card, bg=bg)
@@ -1321,14 +1535,14 @@ class App:
                 grid.columnconfigure(c, minsize=cd_width)
             last_col = 5
 
-        passive_open = cid in self.expanded_passives
+        passive_open = key in self.expanded_passives
         tk.Label(grid, text="P", bg=bg, fg=KEY_FG, width=2, pady=0,
                  font=("Consolas", 10, "bold")).grid(row=0, column=0, sticky="nw")
         p_name = tk.Label(grid, text=f"{passive_name}  {'▼' if passive_open else '▶ 説明を表示'}",
                           bg=bg, fg=FG, anchor="w", cursor="hand2", pady=0,
                           font=("Yu Gothic UI", 9))
         p_name.grid(row=0, column=1, columnspan=last_col - 1, sticky="w", padx=(2, 8))
-        p_name.bind("<Button-1>", lambda e: self._toggle(self.expanded_passives, cid))
+        p_name.bind("<Button-1>", lambda e: self._toggle(self.expanded_passives, key))
         tk.Label(grid, text=passive_cd or "", bg=bg, fg=FG, anchor="e", pady=0,
                  font=("Consolas", 10)).grid(row=0, column=last_col, sticky="e")
         if passive_open:
