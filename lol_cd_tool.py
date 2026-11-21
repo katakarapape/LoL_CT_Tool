@@ -1617,9 +1617,10 @@ class App:
         if not card_open:
             # 折りたたみ時は全スキルのCDを1行に要約（ランク1→最大ランク）。射程があれば括弧で添える
             parts = [f"P {passive_cd}"] if passive_cd else []
-            for key, spell in zip(SPELL_KEYS, champ["spells"]):
-                part = f"{key} {cd_range(spell.get('cooldownBurn', ''))}"
-                spell_range = champ_spell_range_text(champ, key, spell)
+            # スキルのキーは key と別名にする（key はクリック時に参照する開閉状態のキー）
+            for skey, spell in zip(SPELL_KEYS, champ["spells"]):
+                part = f"{skey} {cd_range(spell.get('cooldownBurn', ''))}"
+                spell_range = champ_spell_range_text(champ, skey, spell)
                 parts.append(f"{part}({spell_range})" if spell_range else part)
             summary = tk.Label(card, text="   ".join(parts), bg=bg, fg=PASSIVE_FG, anchor="w",
                                cursor="hand2", font=("Consolas", 10))
@@ -1666,12 +1667,12 @@ class App:
                      wraplength=600, font=("Yu Gothic UI", 9)
                      ).grid(row=1, column=1, columnspan=last_col, sticky="w", padx=(2, 8), pady=(0, 4))
 
-        for i, (key, spell) in enumerate(zip(SPELL_KEYS, champ["spells"])):
+        for i, (skey, spell) in enumerate(zip(SPELL_KEYS, champ["spells"])):
             cd = spell.get("cooldownBurn", "")
             cd_text = cd if cd and cd != "0" else "—"
-            key_label = tk.Label(grid, text=key, bg=bg, fg=KEY_FG, width=2, pady=0,
+            key_label = tk.Label(grid, text=skey, bg=bg, fg=KEY_FG, width=2, pady=0,
                                  font=("Consolas", 10, "bold"))
-            spell_range = champ_spell_range_text(champ, key, spell)
+            spell_range = champ_spell_range_text(champ, skey, spell)
             name_text = f"{spell['name']}  {spell_range}" if spell_range else spell["name"]
             name_label = tk.Label(grid, text=name_text, bg=bg, fg=FG, anchor="w", pady=0,
                                   font=("Yu Gothic UI", 9))
