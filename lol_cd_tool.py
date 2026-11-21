@@ -431,6 +431,14 @@ SPECIAL_RANGE = {
     "Aatrox": {"Q": "Q1 625 Q2 475 Q3 500"},
     "Akali": {"E": "825 E2 全域"},  # 再発動はマークした敵へ距離無制限でダッシュ
     "LeeSin": {"Q": "1200 Q2 1250", "E": "450 E2 550"},
+    # Q1 は半径 400 の扇（180°）、Q2 は長さ 650 の直線（DDragon の 650 は Q2 の値）。V26.20 時点
+    "Ambessa": {"Q": "Q1 400 Q2 650"},
+}
+
+# パッシブの射程・ダッシュ距離。Data Dragon にパッシブの射程は無いので固定で持つ。
+# LoL Wiki の各記事より（2026-11 / V26.20 時点）
+PASSIVE_RANGE = {
+    "Ambessa": "ダッシュ175〜350",  # スキル後の移動・攻撃で短くダッシュ（Target Range 175-350）
 }
 
 
@@ -1613,10 +1621,14 @@ class App:
             passive_name = champ["passive"]["name"]
             passive_text = html_to_text(champ["passive"]["description"]) + "\n（公式の説明文）"
         passive_cd = passive_cd_summary(passive_text)
+        passive_range = PASSIVE_RANGE.get(cid, "")
 
         if not card_open:
             # 折りたたみ時は全スキルのCDを1行に要約（ランク1→最大ランク）。射程があれば括弧で添える
-            parts = [f"P {passive_cd}"] if passive_cd else []
+            parts = []
+            if passive_cd or passive_range:
+                parts.append(f"P {passive_cd}({passive_range})" if passive_cd and passive_range
+                             else f"P {passive_cd or passive_range}")
             # スキルのキーは key と別名にする（key はクリック時に参照する開閉状態のキー）
             for skey, spell in zip(SPELL_KEYS, champ["spells"]):
                 part = f"{skey} {cd_range(spell.get('cooldownBurn', ''))}"
@@ -1653,7 +1665,8 @@ class App:
         passive_open = key in self.expanded_passives
         tk.Label(grid, text="P", bg=bg, fg=KEY_FG, width=2, pady=0,
                  font=("Consolas", 10, "bold")).grid(row=0, column=0, sticky="nw")
-        p_name = tk.Label(grid, text=f"{passive_name}  {'▼' if passive_open else '▶ 説明を表示'}",
+        p_head = f"{passive_name}  {passive_range}" if passive_range else passive_name
+        p_name = tk.Label(grid, text=f"{p_head}  {'▼' if passive_open else '▶ 説明を表示'}",
                           bg=bg, fg=FG, anchor="w", cursor="hand2", pady=0,
                           font=("Yu Gothic UI", 9))
         p_name.grid(row=0, column=1, columnspan=last_col - 1, sticky="w", padx=(2, 8))
