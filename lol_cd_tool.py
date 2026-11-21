@@ -55,10 +55,13 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # summoner_minsec: サモナースペルのCDを '300' ではなく '5:00'（分:秒）で表示するか
 # timer_minsec: タイマー欄の秒で書いた時間（バフ・アイテム）を '180' ではなく '3:00' で表示するか
 # compare: 試合外の見比べ欄で選んだチャンピオンID（未選択は ""。10体表示のときは10枠まで使う）
+# two_columns: チャンピオンのカードを2列に並べる
 # ten_mode: 10体表示。試合中・ピック画面は味方も表示し、試合外の見比べ欄を10枠にする
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
                     "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False,
-                    "timer_minsec": False, "compare": ["", ""], "ten_mode": False}
+                    "timer_minsec": False, "compare": ["", ""], "ten_mode": False,
+                    "two_columns": False}
+TWO_COLUMN_WIDTH = 1180  # 2列表示にしたとき、ウィンドウがこれより狭ければこの幅まで広げる
 COMPARE_SLOTS_TEN = 10  # 10体表示のときの見比べ欄の数（通常は2）
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
@@ -1009,7 +1012,9 @@ class App:
         root.title(f"LoL 敵スキルCD一覧 v{VERSION}")
         # 画面に収まる高さにする（タスクバー分を空ける）
         height = min(780, root.winfo_screenheight() - 90)
-        root.geometry(f"720x{height}")
+        width = (min(TWO_COLUMN_WIDTH, root.winfo_screenwidth() - 40)
+                 if self.settings["two_columns"] else 720)
+        root.geometry(f"{width}x{height}")
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         # 見比べ欄の入力欄（ttk.Combobox）を暗い配色にする。既定テーマは入力欄の色を変えられない
@@ -1094,6 +1099,9 @@ class App:
         self.ten_var = tk.BooleanVar(value=self.settings["ten_mode"])
         tk.Checkbutton(opts, text="10体表示（味方も）", variable=self.ten_var,
                        command=self._toggle_ten_mode, **check).pack(side="left", padx=(8, 0))
+        self.two_var = tk.BooleanVar(value=self.settings["two_columns"])
+        tk.Checkbutton(opts, text="2列表示", variable=self.two_var,
+                       command=self._toggle_two_columns, **check).pack(side="left")
         labels = dict(UPDATE_DAY_CHOICES)
         self.update_var = tk.StringVar(
             value=labels.get(self.settings["update_days"], f"{self.settings['update_days']}日ごと"))
@@ -1225,6 +1233,34 @@ class App:
         self.settings = {**load_settings(), "timer_minsec": self.timer_minsec_var.get()}
         save_settings(self.settings)
         self._build_timer_bar()
+
+    def _toggle_two_columns(self):
+        two = self.two_var.get()
+        self.settings = {**load_settings(), "two_columns": two}
+        save_settings(self.settings)
+        if two and self.root.winfo_width() < TWO_COLUMN_WIDTH:
+            # 720px のままだと1枚が狭すぎるので、画面に収まる範囲で横に広げる
+            width = min(TWO_COLUMN_WIDTH, self.root.winfo_screenwidth() - 40)
+            self.root.geometry(f"{width}x{self.root.winfo_height()}")
+            self.root.update_idletasks()
+        self._flash("2列表示: " + ("オン" if two else "オフ"))
+        self._rerender()
+
+    def _card_wrap(self):
+        """説明文などの折り返し幅（px）。2列表示のときはカード1枚の幅に合わせる。"""
+        width = self.canvas.winfo_width()
+        if width < 100:  # まだ表示前
+            width = self.root.winfo_width() - 30
+        if self.settings["two_columns"]:
+            width //= 2
+        return max(240, width - 90)
+
+    def _card_area(self):
+        """カードを並べる Frame。2列表示は grid で並べるので、見出しとは別の Frame にする。"""
+        area = tk.Frame(self.inner, bg=BG)
+        area.pack(fill="x")
+        area.columnconfigure((0, 1), weight=1, uniform="card")
+        return area
 
     def _toggle_ten_mode(self):
         self.settings = {**load_settings(), "ten_mode": self.ten_var.get()}
@@ -1558,14 +1594,16 @@ class App:
         self._clear()
         if shown_allies or (self.settings["ten_mode"] and mine):
             self._section_label(f"味方 {len(shown_allies) + bool(mine)} 人")
+        area = self._card_area()
         if mine:  # 自分のチャンピオンを一番上に
-            self._add_card(*mine, False, is_self=True)
+            self._add_card(*mine, False, is_self=True, parent=area)
         for champ, pos, name in shown_allies:
-            self._add_card(champ, pos, name, False, is_ally=True)
+            self._add_card(champ, pos, name, False, is_ally=True, parent=area)
         if self.settings["ten_mode"]:
             self._section_label(f"敵 {len(enemies)} 人")
+        area = self._card_area()  # 敵は自分・味方とは別の行から並べる
         for champ, pos, name in enemies:
-            self._add_card(champ, pos, name, bool(my_pos) and pos == my_pos)
+            self._add_card(champ, pos, name, bool(my_pos) and pos == my_pos, parent=area)
 
     def _section_label(self, text):
         """10体表示で味方・敵の並びの区切りに出す見出し。"""
@@ -1598,8 +1636,7 @@ class App:
             box.bind("<Return>", lambda e, s=slot, b=box, v=var: self._pick_compare(s, b, v))
             box.bind("<<ComboboxSelected>>",
                      lambda e, s=slot, b=box, v=var: self._pick_compare(s, b, v))
-        self.compare_cards = tk.Frame(self.inner, bg=BG)
-        self.compare_cards.pack(fill="x")
+        self.compare_cards = self._card_area()
         self._render_compare_cards()
 
     def _match_names(self, text):
@@ -1680,9 +1717,16 @@ class App:
     def _add_card(self, champ, position, fallback_name, is_lane, is_self=False, parent=None,
                   is_ally=False):
         bg = CARD_ME if is_self or is_ally else CARD_HL if is_lane else CARD_BG
-        card = tk.Frame(parent or self.inner, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
+        parent = parent or self.inner
+        card = tk.Frame(parent, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
                         highlightbackground=ME_FG if is_self else GOLD)
-        card.pack(fill="x", padx=4, pady=2)
+        two = self.settings["two_columns"] and parent is not self.inner
+        if two:  # 左→右、上→下の順に2列で並べる（同じ行のカードは高さを揃える）
+            n = len(parent.grid_slaves())
+            card.grid(row=n // 2, column=n % 2, sticky="nsew", padx=2, pady=2)
+        else:
+            card.pack(fill="x", padx=4, pady=2)
+        wrap = self._card_wrap()
 
         pos = POSITION_LABEL.get(position, "")
         name = champ["name"] if champ else fallback_name
@@ -1737,7 +1781,8 @@ class App:
                 spell_range = champ_spell_range_text(champ, skey, spell)
                 parts.append(f"{part}({spell_range})" if spell_range else part)
             summary = tk.Label(card, text="   ".join(parts), bg=bg, fg=PASSIVE_FG, anchor="w",
-                               cursor="hand2", font=("Consolas", 10))
+                               justify="left", wraplength=wrap + 40, cursor="hand2",
+                               font=("Consolas", 10))
             summary.pack(fill="x", padx=(28, 8), pady=(0, 4))
             summary.bind("<Button-1>", lambda e: self._toggle(self.collapsed_cards, key))
             return
@@ -1757,7 +1802,8 @@ class App:
         else:
             # 列: [キー, 名前, CD] × 2（Q W / E R の2×2配置）。名前列を伸ばしてCDを右寄せ
             # CD列は最長の値に合わせた固定幅、名前列は均等にして、全カードで列位置を揃える
-            cd_width = tkfont.Font(family="Consolas", size=10).measure("0" * 21)
+            # 2列表示はカードが狭いので CD 列を詰める（長い CD はその分だけ広がる）
+            cd_width = tkfont.Font(family="Consolas", size=10).measure("0" * (14 if two else 21))
             for c in (1, 4):
                 grid.columnconfigure(c, weight=1, uniform="name")
             for c in (2, 5):
@@ -1779,7 +1825,7 @@ class App:
             # Tk は半角スペースで優先的に改行するため、日本語文中では折り返しが不自然になる
             tk.Label(grid, text=passive_text.replace(" ", " "), bg=bg, fg=PASSIVE_FG,
                      anchor="w", justify="left",
-                     wraplength=600, font=("Yu Gothic UI", 9)
+                     wraplength=wrap, font=("Yu Gothic UI", 9)
                      ).grid(row=1, column=1, columnspan=last_col, sticky="w", padx=(2, 8), pady=(0, 4))
 
         # Q/W/E/R も名前をクリックで JP Wiki の説明文を開閉（取得できなければ公式の説明文）
@@ -1826,7 +1872,7 @@ class App:
                     title = spell["name"]
                     text = html_to_text(spell.get("description", "")) + "\n（公式の説明文）"
                 tk.Label(grid, text=f"[{skey}] {title}\n{text}".replace(" ", " "), bg=bg,
-                         fg=PASSIVE_FG, anchor="w", justify="left", wraplength=600,
+                         fg=PASSIVE_FG, anchor="w", justify="left", wraplength=wrap,
                          font=("Yu Gothic UI", 9)
                          ).grid(row=text_row, column=1, columnspan=last_col, sticky="w",
                                 padx=(2, 8), pady=(0, 4))
