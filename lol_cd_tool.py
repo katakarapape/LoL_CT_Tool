@@ -27,6 +27,7 @@ import re
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import tkinter.ttk as ttk
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -53,9 +54,10 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # voice_advance: タイマー音声を節目より何秒早く読み上げるか（0.0〜VOICE_ADVANCE_MAX）
 # summoner_minsec: サモナースペルのCDを '300' ではなく '5:00'（分:秒）で表示するか
 # timer_minsec: タイマー欄の秒で書いた時間（バフ・アイテム）を '180' ではなく '3:00' で表示するか
+# compare: 試合外の見比べ欄で選んだチャンピオンID 2体分（未選択は ""）
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
                     "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False,
-                    "timer_minsec": False}
+                    "timer_minsec": False, "compare": ["", ""]}
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -621,6 +623,12 @@ def resolve_champion(player, by_id_lower, by_name):
     return by_name.get(name) or by_id_lower.get(name.lower().replace(" ", "").replace("'", ""))
 
 
+def kana_fold(text):
+    """検索用にひらがなをカタカナへ、英字を小文字へ揃える（「あーり」「ahri」でアーリに当たる）。"""
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c
+                   for c in text).lower().replace(" ", "").replace("・", "")
+
+
 def self_key(champ_id):
     """自分のカードの開閉状態のキー。ミラーマッチでも敵カード（チャンピオンID）と区別する。"""
     return f"me:{champ_id}"
@@ -932,6 +940,8 @@ class App:
         self.announced = set()  # この試合で読み上げ済みの節目（VOICE_TIMES の秒数）
         self.voice_gen = 0  # 試合が変わるたびに増やす（前の試合で予約した読み上げを無効にする）
         self.voice_queue = queue.Queue()  # 読み上げ待ちの文（重ならないよう1件ずつ読む）
+        self.compare_mode = False  # 試合外の見比べ欄を表示中か（ピックが始まったら消す）
+        self.compare_cards = None  # 見比べ欄のカードを並べる Frame
 
         root.title(f"LoL 敵スキルCD一覧 v{VERSION}")
         # 画面に収まる高さにする（タスクバー分を空ける）
@@ -939,6 +949,20 @@ class App:
         root.geometry(f"720x{height}")
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 見比べ欄の入力欄（ttk.Combobox）を暗い配色にする。既定テーマは入力欄の色を変えられない
+        style = ttk.Style(root)
+        style.theme_use("clam")
+        style.configure("Dark.TCombobox", fieldbackground=CARD_BG, background=CARD_BG,
+                        foreground=FG, arrowcolor=FG, bordercolor=SUB, lightcolor=CARD_BG,
+                        darkcolor=CARD_BG, insertcolor=FG, selectbackground=CARD_HL,
+                        selectforeground=FG)
+        style.map("Dark.TCombobox", background=[("active", CARD_HL), ("pressed", CARD_HL)],
+                  fieldbackground=[("readonly", CARD_BG), ("focus", CARD_BG)],
+                  foreground=[("readonly", FG)])
+        root.option_add("*TCombobox*Listbox.background", CARD_BG)
+        root.option_add("*TCombobox*Listbox.foreground", FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", CARD_HL)
+        root.option_add("*TCombobox*Listbox.font", ("Yu Gothic UI", 10))
 
         top = tk.Frame(root, bg=BG)
         top.pack(fill="x", padx=10, pady=(8, 2))
@@ -1042,8 +1066,10 @@ class App:
         self.canvas.configure(yscrollcommand=sb.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        # 見比べ欄の候補リスト（popdown）上のホイールは候補のスクロールに使う
         root.bind_all("<MouseWheel>",
-                      lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
+                      lambda e: "popdown" not in str(e.widget)
+                      and self.canvas.yview_scroll(int(-e.delta / 120), "units"))
 
         if resident:
             self._set_visible(False)
@@ -1358,9 +1384,7 @@ class App:
                     champ_id, info = payload
                     self.passive_pending.discard(champ_id)
                     self.passives[champ_id] = info
-                    if self.last_render:  # 表示中のカードに反映
-                        self.last_signature = None
-                        self._render(*self.last_render)
+                    self._rerender()  # 表示中のカードに反映
                 elif kind == "data_error":
                     self._set_status(f"Data Dragon の取得に失敗: {payload}（10秒後に再試行）")
                     self.root.after(10000, lambda: threading.Thread(
@@ -1401,6 +1425,8 @@ class App:
                 self.expanded_passives.clear()
                 self.defaults_applied.clear()
                 self._clear()
+            if not self.compare_mode:  # 試合外はチャンピオンを2体選んで見比べられるようにする
+                self._show_compare()
             if kind == "client":
                 self._set_status(f"クライアント起動中（{payload}）…ピック画面で敵を表示します")
             else:
@@ -1429,6 +1455,8 @@ class App:
             return
         self.last_signature = signature
         self.last_render = (enemies, my_pos, mine)
+        self.compare_mode = False  # ピックが始まったら見比べ欄は消す（下の _clear で消える）
+        self.compare_cards = None
         # 対面が分かっていれば対面だけ開き、他は閉じる（各チャンピオン初回のみ。手動の開閉は尊重）
         if my_pos and any(pos == my_pos for _, pos, _ in enemies):
             for champ, pos, _ in enemies:
@@ -1446,8 +1474,82 @@ class App:
         for champ, pos, name in enemies:
             self._add_card(champ, pos, name, bool(my_pos) and pos == my_pos)
 
+    # --- 試合外の見比べ ---------------------------------------------------
+    def _show_compare(self):
+        """チャンピオンを2体選ぶ欄と、選んだチャンピオンのカードを表示する。"""
+        if not self.champs:
+            return
+        self._clear()
+        self.compare_mode = True
+        names = sorted(self.by_name)
+        bar = tk.Frame(self.inner, bg=BG)
+        bar.pack(fill="x", padx=4, pady=(2, 4))
+        tk.Label(bar, text="見比べ（試合外のみ・ピックが始まると消えます）  名前の一部を入力して Enter / ▼で一覧",
+                 bg=BG, fg=SUB, anchor="w", font=("Yu Gothic UI", 9)
+                 ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ids = (list(self.settings.get("compare") or []) + ["", ""])[:2]
+        for slot, cid in enumerate(ids):
+            bar.columnconfigure(slot, weight=1, uniform="cmp")
+            champ = self.champs.get(cid)
+            var = tk.StringVar(value=champ["name"] if champ else "")
+            box = ttk.Combobox(bar, textvariable=var, values=names, style="Dark.TCombobox",
+                               font=("Yu Gothic UI", 10), height=15)
+            box.grid(row=1, column=slot, sticky="ew", padx=(0, 6) if slot == 0 else 0)
+            box.bind("<KeyRelease>", lambda e, b=box, v=var: self._filter_compare(e, b, v))
+            box.bind("<Return>", lambda e, s=slot, b=box, v=var: self._pick_compare(s, b, v))
+            box.bind("<<ComboboxSelected>>",
+                     lambda e, s=slot, b=box, v=var: self._pick_compare(s, b, v))
+        self.compare_cards = tk.Frame(self.inner, bg=BG)
+        self.compare_cards.pack(fill="x")
+        self._render_compare_cards()
+
+    def _match_names(self, text):
+        """入力を含むチャンピオン名（ひらがな・英語名でも可）。空なら全員。"""
+        query = kana_fold(text)
+        return [n for n in sorted(self.by_name) if not query or query in kana_fold(n)
+                or query in self.by_name[n]["id"].lower()]
+
+    def _filter_compare(self, event, box, var):
+        if event.keysym in ("Return", "Up", "Down", "Escape", "Tab"):
+            return
+        box["values"] = self._match_names(var.get())
+
+    def _pick_compare(self, slot, box, var):
+        text = var.get().strip()
+        champ = None
+        if text:  # 完全一致がなければ候補の先頭
+            matches = self._match_names(text)
+            champ = self.by_name.get(text) or (self.by_name[matches[0]] if matches else None)
+        var.set(champ["name"] if champ else "")
+        box["values"] = sorted(self.by_name)
+        box.selection_clear()
+        ids = (list(load_settings().get("compare") or []) + ["", ""])[:2]
+        ids[slot] = champ["id"] if champ else ""
+        self.settings = {**load_settings(), "compare": ids}
+        save_settings(self.settings)
+        if champ:
+            self.collapsed_cards.discard(champ["id"])  # 選んだチャンピオンは開いて見せる
+        self._render_compare_cards()
+
+    def _compare_champs(self):
+        return [c for c in (self.champs.get(cid) for cid in self.settings.get("compare") or [])
+                if c]
+
+    def _render_compare_cards(self):
+        if not self.compare_cards:
+            return
+        for w in self.compare_cards.winfo_children():
+            w.destroy()
+        for champ in self._compare_champs():
+            if champ["id"] not in self.passives and champ["id"] not in self.passive_pending:
+                self.passive_pending.add(champ["id"])
+                self.passive_requests.put(champ["id"])
+            self._add_card(champ, "", champ["name"], False, parent=self.compare_cards)
+
     def _rerender(self):
-        if self.last_render:
+        if self.compare_mode:
+            self._render_compare_cards()
+        elif self.last_render:
             self.last_signature = None
             self._render(*self.last_render)
 
@@ -1459,6 +1561,8 @@ class App:
         """表示中の全チャンピオンについて、カード/パッシブの開閉をまとめて切り替える。"""
         enemies, _, mine = self.last_render or ([], None, None)
         ids = {c["id"] for c, _, _ in enemies if c}
+        if self.compare_mode:
+            ids = {c["id"] for c in self._compare_champs()}
         if mine and mine[0]:
             ids.add(self_key(mine[0]["id"]))
         if cards is not None:
@@ -1467,9 +1571,9 @@ class App:
             self.expanded_passives = set(ids) if passives else set()
         self._rerender()
 
-    def _add_card(self, champ, position, fallback_name, is_lane, is_self=False):
+    def _add_card(self, champ, position, fallback_name, is_lane, is_self=False, parent=None):
         bg = CARD_ME if is_self else CARD_HL if is_lane else CARD_BG
-        card = tk.Frame(self.inner, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
+        card = tk.Frame(parent or self.inner, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
                         highlightbackground=ME_FG if is_self else GOLD)
         card.pack(fill="x", padx=4, pady=2)
 
