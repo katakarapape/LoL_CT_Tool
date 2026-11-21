@@ -466,8 +466,45 @@ def champ_spell_range_text(champ, key, spell):
 # 敵として出てきたチャンピオンのページだけを取りに行き、パッチごとにキャッシュする。
 JPWIKI = "https://www.loljp-wiki.jp/wiki/"
 JPWIKI_UA = {"User-Agent": "LoL_CT_Tool/1.0 (personal cooldown viewer)"}
-_PASSIVE_RE = re.compile(
-    r'<dl class="[^"]*\bpassive\b[^"]*">\s*<dt>(.*?)</dt>\s*<dd>(.*?)</dd>\s*</dl>', re.S)
+# スキル説明の <dl>。ページ内の並びは passive → Q/W/E（class 無し）→ ult(R)。
+# ウディアは ult が無く4つ並び、アフェリオスは武器ごとの説明が間に入るので、名前で対応付ける
+_SKILL_DL_RE = re.compile(
+    r'<dl class="([^"]*)"[^>]*>\s*<dt>(.*?)</dt>\s*<dd>(.*?)</dd>\s*</dl>', re.S)
+
+
+def _skill_name_key(name):
+    """Wiki の『幻惑のオーブ (Orb of Deception)』と Data Dragon の『幻惑のオーブ』を突き合わせる形にする。"""
+    return re.sub(r"[\s・/／!！]", "", name.split("(")[0])
+
+
+def parse_wiki_skills(page, spell_names):
+    """JP Wiki のチャンピオンページから {"name", "text", "spells": {"Q": {"name", "text"}, …}} を返す。
+    spell_names は Data Dragon の Q/W/E/R の名前。パッシブが見つからなければ None。"""
+    start = page.find('passive"')
+    if start < 0:
+        return None
+    blocks = [(cls, html_to_text(dt).replace("\n", " "), html_to_text(dd))
+              for cls, dt, dd in _SKILL_DL_RE.findall(page, page.rfind("<dl", 0, start))]
+    if not blocks or "passive" not in blocks[0][0]:
+        return None
+    _, p_name, p_text = blocks[0]
+    skills = []  # passive の後、最初の ult まで（ult が無ければ4つ）
+    for cls, name, text in blocks[1:]:
+        skills.append((cls, name, text))
+        if "ult" in cls.split() or len(skills) >= 12:
+            break
+    by_name = {_skill_name_key(name): (name, text) for _, name, text in skills}
+    plain = [(name, text) for cls, name, text in skills if "ult" not in cls.split()]
+    ult = [(name, text) for cls, name, text in skills if "ult" in cls.split()]
+    by_order = plain[:3] + (ult or plain[3:4])
+    spells = {}
+    for i, (key, ddragon_name) in enumerate(zip(SPELL_KEYS, spell_names)):
+        hit = by_name.get(_skill_name_key(ddragon_name))
+        if not hit and len(plain) <= 4 and i < len(by_order):
+            hit = by_order[i]  # 名前が合わなくても並びが標準どおりなら順番で対応付ける
+        if hit:
+            spells[key] = {"name": hit[0], "text": hit[1]}
+    return {"name": p_name, "text": p_text, "spells": spells}
 
 
 def _norm(name):
@@ -556,20 +593,22 @@ class JpWikiPassives:
                 return page
         return None
 
-    def get(self, champ_id):
+    def get(self, champ_id, spell_names):
+        """spell_names: Data Dragon の Q/W/E/R の名前（Wiki のスキルとの対応付けに使う）。"""
         path = self.dir / f"{champ_id}.json"
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if "spells" in info:  # 旧版のキャッシュ（パッシブのみ）は取り直す
+                return info
         self._load_index()
         page = self._page_for(champ_id)
         if not page:
             return None
         url = JPWIKI + "?" + urllib.parse.quote(f"Champion/{page}", safe="/")
-        m = _PASSIVE_RE.search(_http_text(url, headers=JPWIKI_UA))
-        if not m:
+        info = parse_wiki_skills(_http_text(url, headers=JPWIKI_UA), spell_names)
+        if not info:
             return None
-        info = {"name": html_to_text(m.group(1)).replace("\n", " "),
-                "text": html_to_text(m.group(2)), "url": url}
+        info["url"] = url
         path.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
         return info
 
@@ -936,6 +975,7 @@ class App:
         self.last_render = None  # (enemies, my_pos, mine) パッシブ取得後の再描画用
         self.collapsed_cards = set()  # 折りたたんだチャンピオンID（既定は展開）
         self.expanded_passives = set()  # 説明文を開いたパッシブ（既定は折りたたみ）
+        self.expanded_spells = set()  # 説明文を開いたスキル（(カードのキー, "Q") の組）
         self.defaults_applied = set()  # 対面判明時の既定（対面以外は閉じる）を適用済みのID
         self.results = queue.Queue()
         self.polling = False
@@ -1313,7 +1353,7 @@ class App:
         while True:
             champ_id = self.passive_requests.get()
             try:
-                info = self.jpwiki.get(champ_id)
+                info = self.jpwiki.get(champ_id, [s["name"] for s in self.champs[champ_id]["spells"]])
             except Exception:
                 info = None  # Wiki に繋がらなくても本体は動かす（公式の説明文で代替）
             self.results.put(("passive", (champ_id, info)))
@@ -1431,6 +1471,7 @@ class App:
                 # 試合が終わったら開閉状態をリセット
                 self.collapsed_cards.clear()
                 self.expanded_passives.clear()
+                self.expanded_spells.clear()
                 self.defaults_applied.clear()
                 self._clear()
             if not self.compare_mode:  # 試合外はチャンピオンを2体選んで見比べられるようにする
@@ -1680,32 +1721,54 @@ class App:
                      wraplength=600, font=("Yu Gothic UI", 9)
                      ).grid(row=1, column=1, columnspan=last_col, sticky="w", padx=(2, 8), pady=(0, 4))
 
+        # Q/W/E/R も名前をクリックで JP Wiki の説明文を開閉（取得できなければ公式の説明文）
+        wiki_spells = (self.passives.get(cid) or {}).get("spells", {})
         for i, (skey, spell) in enumerate(zip(SPELL_KEYS, champ["spells"])):
             cd = spell.get("cooldownBurn", "")
             cd_text = cd if cd and cd != "0" else "—"
+            spell_open = (key, skey) in self.expanded_spells
             key_label = tk.Label(grid, text=skey, bg=bg, fg=KEY_FG, width=2, pady=0,
-                                 font=("Consolas", 10, "bold"))
+                                 cursor="hand2", font=("Consolas", 10, "bold"))
             spell_range = champ_spell_range_text(champ, skey, spell)
             name_text = f"{spell['name']}  {spell_range}" if spell_range else spell["name"]
-            name_label = tk.Label(grid, text=name_text, bg=bg, fg=FG, anchor="w", pady=0,
-                                  font=("Yu Gothic UI", 9))
+            name_label = tk.Label(grid, text=f"{name_text} {'▼' if spell_open else '▶'}", bg=bg,
+                                  fg=FG, anchor="w", pady=0, cursor="hand2", font=("Yu Gothic UI", 9))
+            for w in (key_label, name_label):
+                w.bind("<Button-1>", lambda e, s=skey: self._toggle(self.expanded_spells, (key, s)))
             cd_label = tk.Label(grid, text=cd_text, bg=bg, fg=FG, anchor="w" if layout == "row" else "e",
                                 pady=0, font=("Consolas", 10))
+            # 説明文は開いたスキルの行の下（2×2 は2つ並んだ行の下、横4列は全スキルの下）に出す
             if layout == "row":
                 col = i * 2
                 key_label.grid(row=2, column=col, sticky="w")
                 name_label.grid(row=2, column=col + 1, sticky="w", padx=(2, 6))
                 cd_label.grid(row=3, column=col + 1, sticky="w", padx=(2, 6))
+                text_row = 4 + i
             elif layout == "column":
-                key_label.grid(row=2 + i, column=0, sticky="w")
-                name_label.grid(row=2 + i, column=1, sticky="w", padx=(2, 6))
-                cd_label.grid(row=2 + i, column=2, sticky="e")
+                key_label.grid(row=2 + i * 2, column=0, sticky="w")
+                name_label.grid(row=2 + i * 2, column=1, sticky="w", padx=(2, 6))
+                cd_label.grid(row=2 + i * 2, column=2, sticky="e")
+                text_row = 3 + i * 2
             else:
-                row, col = 2 + i // 2, (i % 2) * 3
+                row, col = 2 + (i // 2) * 3, (i % 2) * 3
                 key_label.grid(row=row, column=col, sticky="w")
                 name_label.grid(row=row, column=col + 1, sticky="w", padx=(2, 6))
                 cd_label.grid(row=row, column=col + 2, sticky="e",
                               padx=(0, 14 if col == 0 else 0))
+                text_row = row + 1 + i % 2
+            if spell_open:
+                if skey in wiki_spells:
+                    title, text = wiki_spells[skey]["name"], wiki_spells[skey]["text"]
+                elif cid not in self.passives:
+                    title, text = spell["name"], "JP Wiki から取得中…"
+                else:
+                    title = spell["name"]
+                    text = html_to_text(spell.get("description", "")) + "\n（公式の説明文）"
+                tk.Label(grid, text=f"[{skey}] {title}\n{text}".replace(" ", " "), bg=bg,
+                         fg=PASSIVE_FG, anchor="w", justify="left", wraplength=600,
+                         font=("Yu Gothic UI", 9)
+                         ).grid(row=text_row, column=1, columnspan=last_col, sticky="w",
+                                padx=(2, 8), pady=(0, 4))
 
 
 def main():
