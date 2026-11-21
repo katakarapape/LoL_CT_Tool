@@ -54,10 +54,12 @@ LAST_UPDATE_CHECK_PATH = CACHE_DIR.parent / "last_update_check"  # 最後に更�
 # voice_advance: タイマー音声を節目より何秒早く読み上げるか（0.0〜VOICE_ADVANCE_MAX）
 # summoner_minsec: サモナースペルのCDを '300' ではなく '5:00'（分:秒）で表示するか
 # timer_minsec: タイマー欄の秒で書いた時間（バフ・アイテム）を '180' ではなく '3:00' で表示するか
-# compare: 試合外の見比べ欄で選んだチャンピオンID 2体分（未選択は ""）
+# compare: 試合外の見比べ欄で選んだチャンピオンID（未選択は ""。10体表示のときは10枠まで使う）
+# ten_mode: 10体表示。試合中・ピック画面は味方も表示し、試合外の見比べ欄を10枠にする
 DEFAULT_SETTINGS = {"show_on": "champselect", "update_days": 7, "spell_layout": "grid",
                     "timer_voice": False, "voice_advance": 0.0, "summoner_minsec": False,
-                    "timer_minsec": False, "compare": ["", ""]}
+                    "timer_minsec": False, "compare": ["", ""], "ten_mode": False}
+COMPARE_SLOTS_TEN = 10  # 10体表示のときの見比べ欄の数（通常は2）
 DEFAULT_LOL_DIR = Path(r"C:\Riot Games\League of Legends")
 STARTUP_LINK = (Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
                 / "LoL 敵スキルCD一覧.lnk")
@@ -681,6 +683,11 @@ def self_key(champ_id):
     return f"me:{champ_id}"
 
 
+def ally_key(champ_id):
+    """味方のカードの開閉状態のキー（敵と同じチャンピオンでも区別する）。"""
+    return f"ally:{champ_id}"
+
+
 def player_id(p):
     return p.get("riotId") or p.get("summonerName") or ""
 
@@ -696,9 +703,9 @@ def sort_enemies(enemies, my_pos):
 
 
 def enemies_from_game(game, by_id_lower, by_name):
-    """Live Client の allgamedata から (自分のposition, 敵リスト, 自分)。
+    """Live Client の allgamedata から (自分のposition, 敵リスト, 自分, 味方リスト)。
 
-    自分は (champ, position, fallback_name)。見つからなければ None。
+    自分は (champ, position, fallback_name)。見つからなければ None。味方リストに自分は含めない。
     """
     players = game.get("allPlayers", [])
     active = game.get("activePlayer", {})
@@ -711,13 +718,17 @@ def enemies_from_game(game, by_id_lower, by_name):
                for p in players if p.get("team") != my_team]
     mine = ((resolve_champion(me, by_id_lower, by_name), my_pos, me.get("championName", "?"))
             if me else None)
-    return my_pos, sort_enemies(enemies, my_pos), mine
+    allies = [(resolve_champion(p, by_id_lower, by_name), p.get("position", ""),
+               p.get("championName", "?"))
+              for p in players if p.get("team") == my_team and p is not me]
+    return my_pos, sort_enemies(enemies, my_pos), mine, sort_enemies(allies, None)
 
 
 def enemies_from_champ_select(session, by_key):
-    """LCU の champ-select session から (自分のposition, 公開済みの敵リスト, 敵の人数, 自分)。
+    """LCU の champ-select session から (自分のposition, 公開済みの敵リスト, 敵の人数, 自分, 味方リスト)。
 
     自分は (champ, position, name)。ピック確定前はホバー中のチャンピオン、未選択なら None。
+    味方リストも同じく（ホバー中を含む）。選んでいない味方と自分は含めない。
     """
     me = next((p for p in session.get("myTeam", [])
                if p.get("cellId") == session.get("localPlayerCellId")), {})
@@ -728,10 +739,14 @@ def enemies_from_champ_select(session, by_key):
         champ = by_key.get(str(p.get("championId", 0)))
         if champ:
             enemies.append((champ, LCU_POSITION.get(p.get("assignedPosition", ""), ""), champ["name"]))
-    my_champ = (by_key.get(str(me.get("championId") or 0))
-                or by_key.get(str(me.get("championPickIntent") or 0)))
+    def picked(p):
+        return (by_key.get(str(p.get("championId") or 0))
+                or by_key.get(str(p.get("championPickIntent") or 0)))
+    my_champ = picked(me)
     mine = (my_champ, my_pos, my_champ["name"]) if my_champ else None
-    return my_pos, sort_enemies(enemies, my_pos), len(their), mine
+    allies = [(c, LCU_POSITION.get(p.get("assignedPosition", ""), ""), c["name"])
+              for p in session.get("myTeam", []) if p is not me and (c := picked(p))]
+    return my_pos, sort_enemies(enemies, my_pos), len(their), mine, sort_enemies(allies, None)
 
 
 # --- 常駐・スタートアップ登録 ---------------------------------------------------
@@ -972,7 +987,7 @@ class App:
         self.passive_pending = set()
         self.version = "?"
         self.last_signature = None
-        self.last_render = None  # (enemies, my_pos, mine) パッシブ取得後の再描画用
+        self.last_render = None  # (enemies, my_pos, mine, allies) パッシブ取得後の再描画用
         self.collapsed_cards = set()  # 折りたたんだチャンピオンID（既定は展開）
         self.expanded_passives = set()  # 説明文を開いたパッシブ（既定は折りたたみ）
         self.expanded_spells = set()  # 説明文を開いたスキル（(カードのキー, "Q") の組）
@@ -1076,6 +1091,9 @@ class App:
         advance.bind("<FocusOut>", lambda e: self._set_voice_advance())
         tk.Label(opts, text="秒早く", bg=BG, fg=SUB,
                  font=("Yu Gothic UI", 9)).pack(side="left", padx=(2, 0))
+        self.ten_var = tk.BooleanVar(value=self.settings["ten_mode"])
+        tk.Checkbutton(opts, text="10体表示（味方も）", variable=self.ten_var,
+                       command=self._toggle_ten_mode, **check).pack(side="left", padx=(8, 0))
         labels = dict(UPDATE_DAY_CHOICES)
         self.update_var = tk.StringVar(
             value=labels.get(self.settings["update_days"], f"{self.settings['update_days']}日ごと"))
@@ -1207,6 +1225,16 @@ class App:
         self.settings = {**load_settings(), "timer_minsec": self.timer_minsec_var.get()}
         save_settings(self.settings)
         self._build_timer_bar()
+
+    def _toggle_ten_mode(self):
+        self.settings = {**load_settings(), "ten_mode": self.ten_var.get()}
+        save_settings(self.settings)
+        self._flash("10体表示: " + ("オン（試合中・ピック画面は味方も表示、試合外は10体まで選択）"
+                                    if self.ten_var.get() else "オフ"))
+        if self.compare_mode:
+            self._show_compare()  # 見比べ欄の枠の数を変える
+        else:
+            self._rerender()
 
     def _toggle_voice(self):
         self.settings = {**load_settings(), "timer_voice": self.voice_var.get()}
@@ -1448,18 +1476,20 @@ class App:
     def _apply_state(self, kind, payload):
         if kind == "game":
             self._announce_time(payload)
-            my_pos, enemies, mine = enemies_from_game(payload, self.by_id_lower, self.by_name)
+            my_pos, enemies, mine, allies = enemies_from_game(payload, self.by_id_lower, self.by_name)
             if not enemies:
                 self._set_status("試合中（敵プレイヤー情報なし）")
             else:
-                self._set_status(f"試合中  |  敵 {len(enemies)} 人")
-                self._render(enemies, my_pos, mine)
+                self._set_status(f"試合中  |  敵 {len(enemies)} 人"
+                                 + (f"  味方 {len(allies) + bool(mine)} 人"
+                                    if self.settings["ten_mode"] else ""))
+                self._render(enemies, my_pos, mine, allies)
             active = True
         elif kind == "champselect":
-            my_pos, enemies, total, mine = enemies_from_champ_select(payload or {}, self.by_key)
+            my_pos, enemies, total, mine, allies = enemies_from_champ_select(payload or {}, self.by_key)
             self._set_status(f"ピック画面  |  敵 {len(enemies)}/{total} 人公開"
                              + ("（試合開始時に全員表示）" if len(enemies) < total else ""))
-            self._render(enemies, my_pos, mine)
+            self._render(enemies, my_pos, mine, allies)
             active = True
         else:
             self.game_time = -1
@@ -1497,13 +1527,21 @@ class App:
         for w in self.inner.winfo_children():
             w.destroy()
 
-    def _render(self, enemies, my_pos, mine=None):
+    def _render(self, enemies, my_pos, mine=None, allies=()):
+        """allies は常に受け取っておき、10体表示のときだけ自分の下に並べる（切り替えてすぐ反映するため）。"""
+        shown_allies = list(allies) if self.settings["ten_mode"] else []
         signature = (my_pos, tuple((c["id"] if c else name, pos) for c, pos, name in enemies),
-                     ((mine[0]["id"] if mine[0] else mine[2]) if mine else None))
+                     ((mine[0]["id"] if mine[0] else mine[2]) if mine else None),
+                     tuple((c["id"] if c else name, pos) for c, pos, name in shown_allies))
         if signature == self.last_signature:
             return
         self.last_signature = signature
-        self.last_render = (enemies, my_pos, mine)
+        self.last_render = (enemies, my_pos, mine, allies)
+        # 味方は既定でたたむ（10人ぶん開くと長くなりすぎる。各チャンピオン初回のみ）
+        for champ, _, _ in shown_allies:
+            if champ and ally_key(champ["id"]) not in self.defaults_applied:
+                self.defaults_applied.add(ally_key(champ["id"]))
+                self.collapsed_cards.add(ally_key(champ["id"]))
         self.compare_mode = False  # ピックが始まったら見比べ欄は消す（下の _clear で消える）
         self.compare_cards = None
         # 対面が分かっていれば対面だけ開き、他は閉じる（各チャンピオン初回のみ。手動の開閉は尊重）
@@ -1513,19 +1551,30 @@ class App:
                     self.defaults_applied.add(champ["id"])
                     if pos != my_pos:
                         self.collapsed_cards.add(champ["id"])
-        for champ, _, _ in enemies + ([mine] if mine else []):
+        for champ, _, _ in list(enemies) + shown_allies + ([mine] if mine else []):
             if champ and champ["id"] not in self.passives and champ["id"] not in self.passive_pending:
                 self.passive_pending.add(champ["id"])
                 self.passive_requests.put(champ["id"])
         self._clear()
+        if shown_allies or (self.settings["ten_mode"] and mine):
+            self._section_label(f"味方 {len(shown_allies) + bool(mine)} 人")
         if mine:  # 自分のチャンピオンを一番上に
             self._add_card(*mine, False, is_self=True)
+        for champ, pos, name in shown_allies:
+            self._add_card(champ, pos, name, False, is_ally=True)
+        if self.settings["ten_mode"]:
+            self._section_label(f"敵 {len(enemies)} 人")
         for champ, pos, name in enemies:
             self._add_card(champ, pos, name, bool(my_pos) and pos == my_pos)
 
+    def _section_label(self, text):
+        """10体表示で味方・敵の並びの区切りに出す見出し。"""
+        tk.Label(self.inner, text=text, bg=BG, fg=SUB, anchor="w",
+                 font=("Yu Gothic UI", 9, "bold")).pack(fill="x", padx=6, pady=(4, 0))
+
     # --- 試合外の見比べ ---------------------------------------------------
     def _show_compare(self):
-        """チャンピオンを2体選ぶ欄と、選んだチャンピオンのカードを表示する。"""
+        """チャンピオンを選ぶ欄（通常2つ、10体表示は10）と、選んだチャンピオンのカードを表示する。"""
         if not self.champs:
             return
         self._clear()
@@ -1536,14 +1585,15 @@ class App:
         tk.Label(bar, text="見比べ（試合外のみ・ピックが始まると消えます）  名前の一部を入力して Enter / ▼で一覧",
                  bg=BG, fg=SUB, anchor="w", font=("Yu Gothic UI", 9)
                  ).grid(row=0, column=0, columnspan=2, sticky="w")
-        ids = (list(self.settings.get("compare") or []) + ["", ""])[:2]
-        for slot, cid in enumerate(ids):
-            bar.columnconfigure(slot, weight=1, uniform="cmp")
+        for col in (0, 1):
+            bar.columnconfigure(col, weight=1, uniform="cmp")
+        for slot, cid in enumerate(self._compare_ids()):  # 2列で並べる（10枠なら 2×5）
             champ = self.champs.get(cid)
             var = tk.StringVar(value=champ["name"] if champ else "")
             box = ttk.Combobox(bar, textvariable=var, values=names, style="Dark.TCombobox",
                                font=("Yu Gothic UI", 10), height=15)
-            box.grid(row=1, column=slot, sticky="ew", padx=(0, 6) if slot == 0 else 0)
+            box.grid(row=1 + slot // 2, column=slot % 2, sticky="ew", pady=1,
+                     padx=(0, 6) if slot % 2 == 0 else 0)
             box.bind("<KeyRelease>", lambda e, b=box, v=var: self._filter_compare(e, b, v))
             box.bind("<Return>", lambda e, s=slot, b=box, v=var: self._pick_compare(s, b, v))
             box.bind("<<ComboboxSelected>>",
@@ -1572,7 +1622,8 @@ class App:
         var.set(champ["name"] if champ else "")
         box["values"] = sorted(self.by_name)
         box.selection_clear()
-        ids = (list(load_settings().get("compare") or []) + ["", ""])[:2]
+        # 10枠ぶん保存する（10体表示を切っても3体目以降は残しておく）
+        ids = (list(load_settings().get("compare") or []) + [""] * COMPARE_SLOTS_TEN)[:COMPARE_SLOTS_TEN]
         ids[slot] = champ["id"] if champ else ""
         self.settings = {**load_settings(), "compare": ids}
         save_settings(self.settings)
@@ -1580,9 +1631,13 @@ class App:
             self.collapsed_cards.discard(champ["id"])  # 選んだチャンピオンは開いて見せる
         self._render_compare_cards()
 
+    def _compare_ids(self):
+        """見比べ欄の各枠のチャンピオンID（通常2枠、10体表示は10枠。未選択は ""）。"""
+        n = COMPARE_SLOTS_TEN if self.settings["ten_mode"] else 2
+        return (list(self.settings.get("compare") or []) + [""] * n)[:n]
+
     def _compare_champs(self):
-        return [c for c in (self.champs.get(cid) for cid in self.settings.get("compare") or [])
-                if c]
+        return [c for c in (self.champs.get(cid) for cid in self._compare_ids()) if c]
 
     def _render_compare_cards(self):
         if not self.compare_cards:
@@ -1608,8 +1663,10 @@ class App:
 
     def _set_all(self, cards=None, passives=None):
         """表示中の全チャンピオンについて、カード/パッシブの開閉をまとめて切り替える。"""
-        enemies, _, mine = self.last_render or ([], None, None)
+        enemies, _, mine, allies = self.last_render or ([], None, None, [])
         ids = {c["id"] for c, _, _ in enemies if c}
+        if self.settings["ten_mode"]:
+            ids |= {ally_key(c["id"]) for c, _, _ in allies if c}
         if self.compare_mode:
             ids = {c["id"] for c in self._compare_champs()}
         if mine and mine[0]:
@@ -1620,8 +1677,9 @@ class App:
             self.expanded_passives = set(ids) if passives else set()
         self._rerender()
 
-    def _add_card(self, champ, position, fallback_name, is_lane, is_self=False, parent=None):
-        bg = CARD_ME if is_self else CARD_HL if is_lane else CARD_BG
+    def _add_card(self, champ, position, fallback_name, is_lane, is_self=False, parent=None,
+                  is_ally=False):
+        bg = CARD_ME if is_self or is_ally else CARD_HL if is_lane else CARD_BG
         card = tk.Frame(parent or self.inner, bg=bg, highlightthickness=2 if is_lane or is_self else 0,
                         highlightbackground=ME_FG if is_self else GOLD)
         card.pack(fill="x", padx=4, pady=2)
@@ -1629,7 +1687,8 @@ class App:
         pos = POSITION_LABEL.get(position, "")
         name = champ["name"] if champ else fallback_name
         cid = champ["id"] if champ else None
-        key = self_key(cid) if is_self and cid else cid  # 開閉状態のキー
+        # 開閉状態のキー（自分・味方は敵と同じチャンピオンでも区別する）
+        key = (self_key(cid) if is_self else ally_key(cid) if is_ally else cid) if cid else cid
         card_open = key not in self.collapsed_cards
         header = f"{'▼' if card_open else '▶'} {name}"
         if pos:
@@ -1638,10 +1697,12 @@ class App:
             header += "  ★対面"
         if is_self:
             header += "  （自分）"
+        if is_ally:
+            header += "  （味方）"
         head_row = tk.Frame(card, bg=bg)
         head_row.pack(fill="x", padx=8, pady=(2, 0))
         head = tk.Label(head_row, text=header, bg=bg,
-                        fg=ME_FG if is_self else GOLD if is_lane else FG, anchor="w",
+                        fg=ME_FG if is_self or is_ally else GOLD if is_lane else FG, anchor="w",
                         cursor="hand2", font=("Yu Gothic UI", 11, "bold"))
         head.pack(side="left", fill="x", expand=True)
 
